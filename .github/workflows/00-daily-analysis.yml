@@ -63,6 +63,23 @@ jobs:
         run: |
           mkdir -p data logs reports
       
+      - name: Verifică suportul pentru limba română
+        run: |
+          python - <<'PY'
+          from src.schemas.decision_action import localize_action_label
+          from src.notification import NotificationService
+
+          assert localize_action_label("buy", "ro") == "Cumpără"
+          assert localize_action_label("watch", "ro") == "Urmărește"
+          assert localize_action_label("hold", "ro") == "Păstrează"
+          assert localize_action_label("sell", "ro") == "Vinde"
+
+          notifier = object.__new__(NotificationService)
+          assert notifier._get_source_display_name("fallback", "ro") == "Sursă de rezervă"
+
+          print("✅ Romanian localization smoke test OK")
+          PY
+
       - name: Efectuați analiza stocurilor
         env:
           # ==========================================
@@ -554,6 +571,25 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_MESSAGE_THREAD_ID: ${{ secrets.TELEGRAM_MESSAGE_THREAD_ID }}
         run: |
+          MODE="${{ github.event.inputs.mode || 'full' }}"
+
+          if [ "$MODE" != "market-only" ]; then
+            STOCK_REPORT="$(find reports -maxdepth 1 -type f -name 'report_????????.md' | head -1)"
+
+            if [ -z "$STOCK_REPORT" ] || [ ! -f "$STOCK_REPORT" ]; then
+              echo "❌ Analiza trebuia să producă raportul acțiunilor, dar report_YYYYMMDD.md lipsește."
+              echo ""
+              echo "Conținut reports/:"
+              ls -la reports/ || true
+              echo ""
+              echo "Ultimele erori din analiză:"
+              grep -E "ERROR|分析未成功|失败" logs/stock_analysis_*.log | tail -40 || true
+              exit 1
+            fi
+
+            echo "✅ Raport acțiuni găsit: $STOCK_REPORT"
+          fi
+          
           python scripts/generate_daily_pdf.py
 
           PDF_FILE="$(find reports -maxdepth 1 -type f -name 'daily_stock_analysis_*.pdf' | sort | tail -1)"
