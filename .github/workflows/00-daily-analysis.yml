@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: '运行模式'
+        description: 'Run mode'
         required: true
         default: 'full'
         type: choice
@@ -19,7 +19,7 @@ on:
           - market-only   # 仅大盘复盘
           - stocks-only   # 仅股票分析
       force_run:
-        description: 'Executare forțată (omisiunea verificărilor din ziua de tranzacționare) '
+        description: 'Force run (omisiunea verificărilor din ziua de tranzacționare) '
         required: false
         default: false
         type: boolean
@@ -42,10 +42,10 @@ jobs:
       - name: Întârziere aleatorie (pentru a evita accesul la ore fixe)
         run: sleep $((RANDOM % 60))  # 随机延迟0-60秒启动
       
-      - name: 检出代码
+      - name: Cod de detectare
         uses: actions/checkout@v5
       
-      - name: 设置 Python 环境
+      - name: Configurarea mediului Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.11'
