@@ -69,13 +69,13 @@ _OPERATION_ADVICE_CANONICAL_MAP = {
 }
 
 _OPERATION_ADVICE_TRANSLATIONS = {
-    "strong_buy": {"zh": "强烈买入", "en": "Strong Buy", "ko": "적극 매수"},
-    "buy": {"zh": "买入", "en": "Buy", "ko": "매수"},
-    "hold": {"zh": "持有", "en": "Hold", "ko": "보유"},
-    "watch": {"zh": "观望", "en": "Watch", "ko": "관망"},
-    "reduce": {"zh": "减仓", "en": "Reduce", "ko": "비중축소"},
-    "sell": {"zh": "卖出", "en": "Sell", "ko": "매도"},
-    "strong_sell": {"zh": "强烈卖出", "en": "Strong Sell", "ko": "적극 매도"},
+    "strong_buy": {"zh": "强烈买入", "en": "Strong Buy", "ko": "적극 매수", "ro": "Cumpărare puternică"},
+    "buy": {"zh": "买入", "en": "Buy", "ko": "매수", "ro": "Cumpără"},
+    "hold": {"zh": "持有", "en": "Hold", "ko": "보유", "ro": "Păstrează"},
+    "watch": {"zh": "观望", "en": "Watch", "ko": "관망", "ro": "Urmărește"},
+    "reduce": {"zh": "减仓", "en": "Reduce", "ko": "비중축소", "ro": "Redu"},
+    "sell": {"zh": "卖出", "en": "Sell", "ko": "매도", "ro": "Vinde"},
+    "strong_sell": {"zh": "强烈卖出", "en": "Strong Sell", "ko": "적극 매도", "ro": "Vânzare puternică"},
 }
 
 _TREND_PREDICTION_CANONICAL_MAP = {
@@ -800,6 +800,158 @@ _DECISION_INTENT_NEGATION_CONNECTORS = (
     "继续",
 )
 
+_REPORT_LABELS_RO = {
+    "dashboard_title": "Tablou de decizie",
+    "brief_title": "Rezumat decizional",
+    "analyzed_prefix": "Analizate",
+    "stock_unit": "acțiuni",
+    "stock_unit_compact": "acțiuni",
+    "buy_label": "Cumpără",
+    "watch_label": "Urmărește",
+    "sell_label": "Vinde",
+    "summary_heading": "Rezumat",
+    "info_heading": "Actualizări importante",
+    "sentiment_summary_label": "Sentiment",
+    "earnings_outlook_label": "Perspective financiare",
+    "risk_alerts_label": "Alerte de risc",
+    "positive_catalysts_label": "Catalizatori pozitivi",
+    "latest_news_label": "Știri recente",
+    "core_conclusion_heading": "Concluzie principală",
+    "one_sentence_label": "Decizie pe scurt",
+    "time_sensitivity_label": "Orizont temporal",
+    "default_time_sensitivity": "În această săptămână",
+    "position_status_label": "Poziție",
+    "action_advice_label": "Acțiune",
+    "no_position_label": "Fără poziție",
+    "has_position_label": "Deținere",
+    "continue_holding": "Continuă deținerea",
+    "market_snapshot_heading": "Situația pieței",
+    "close_label": "Închidere",
+    "prev_close_label": "Închiderea precedentă",
+    "open_label": "Deschidere",
+    "high_label": "Maxim",
+    "low_label": "Minim",
+    "change_pct_label": "Variație %",
+    "change_amount_label": "Variație",
+    "amplitude_label": "Amplitudine",
+    "volume_label": "Volum",
+    "amount_label": "Rulaj",
+    "current_price_label": "Preț curent",
+    "volume_ratio_label": "Raport volum",
+    "turnover_rate_label": "Rată de rotație",
+    "source_label": "Sursă",
+    "data_sources_label": "Surse de date",
+    "data_perspective_heading": "Analiza datelor",
+    "ma_alignment_label": "Aliniere medii mobile",
+    "bullish_alignment_label": "Aliniere ascendentă",
+    "yes_label": "Da",
+    "no_label": "Nu",
+    "none_label": "Niciunul",
+    "trend_strength_label": "Forța trendului",
+    "price_metrics_label": "Indicatori de preț",
+    "ma5_label": "MA5",
+    "ma10_label": "MA10",
+    "ma20_label": "MA20",
+    "bias_ma5_label": "Abatere MA5",
+    "support_level_label": "Suport",
+    "resistance_level_label": "Rezistență",
+    "chip_label": "Structura pozițiilor",
+    "phase_decision_heading": "Decizie în funcție de faza pieței",
+    "action_window_label": "Fereastră de acțiune",
+    "immediate_action_label": "Acțiune curentă",
+    "watch_conditions_label": "Condiții de urmărit",
+    "next_check_time_label": "Următoarea verificare",
+    "confidence_reason_label": "Motivul încrederii",
+    "data_limitations_label": "Limitări ale datelor",
+    "battle_plan_heading": "Plan de acțiune",
+    "ideal_buy_label": "Intrare ideală",
+    "secondary_buy_label": "Intrare secundară",
+    "stop_loss_label": "Stop-loss",
+    "take_profit_label": "Țintă",
+    "suggested_position_label": "Dimensiunea poziției",
+    "entry_plan_label": "Plan de intrare",
+    "risk_control_label": "Controlul riscului",
+    "checklist_heading": "Listă de verificare",
+    "failed_checks_heading": "Verificări nereușite",
+    "history_compare_heading": "Comparație cu semnale istorice",
+    "time_label": "Timp",
+    "score_label": "Scor",
+    "advice_label": "Recomandare",
+    "trend_label": "Trend",
+    "generated_at_label": "Generat la",
+    "report_time_label": "Generat",
+    "no_results": "Nu există rezultate de analiză",
+    "report_title": "Raport de analiză a acțiunilor",
+    "avg_score_label": "Scor mediu",
+    "action_points_heading": "Niveluri de acțiune",
+    "position_advice_heading": "Recomandare pentru poziție",
+    "analysis_model_label": "Model",
+    "not_investment_advice": (
+        "Conținut generat de AI, doar pentru informare. "
+        "Nu reprezintă recomandare de investiții."
+    ),
+    "details_report_hint": "Raport detaliat:",
+    "financial_summary_heading": "Rezumat financiar",
+    "report_date_label": "Data raportului",
+    "revenue_label": "Venituri",
+    "net_profit_label": "Profit net",
+    "operating_cash_flow_label": "Flux de numerar operațional",
+    "roe_label": "ROE",
+    "revenue_yoy_label": "Venituri YoY",
+    "net_profit_yoy_label": "Profit net YoY",
+    "gross_margin_label": "Marjă brută",
+    "shareholder_return_heading": "Randament pentru acționari",
+    "ttm_cash_dividend_label": "Dividend cash TTM / acțiune",
+    "ttm_event_count_label": "Evenimente dividend TTM",
+    "ttm_dividend_yield_label": "Randament dividend TTM",
+    "latest_ex_dividend_label": "Ultima dată ex-dividend",
+    "institutional_flow_heading": "Fluxuri instituționale",
+    "institutional_flow_note": (
+        "Pozitiv = cumpărare netă, negativ = vânzare netă; "
+        "unitate: acțiuni."
+    ),
+    "inst_foreign_label": "Investitori străini",
+    "inst_trust_label": "Fonduri",
+    "inst_dealer_label": "Dealer",
+    "inst_total_label": "Total instituțional",
+    "related_boards_heading": "Sectoare asociate",
+    "industry_boards_heading": "Sectoare industriale",
+    "concept_boards_heading": "Teme",
+    "board_name_label": "Sector",
+    "board_type_label": "Tip",
+    "board_status_label": "Stare",
+    "board_change_pct_label": "Variație %",
+    "leading_board_label": "Lider",
+    "lagging_board_label": "În urmă",
+    "signal_attribution_heading": "Atribuirea semnalului",
+    "attribution_weights_label": "Ponderi",
+    "technical_indicators_label": "Indicatori tehnici",
+    "news_sentiment_label": "Sentiment din știri",
+    "fundamentals_label": "Fundamente",
+    "market_conditions_label": "Condiții de piață",
+    "strongest_bullish_signal_label": "Cel mai puternic semnal ascendent",
+    "strongest_bearish_signal_label": "Cel mai puternic semnal descendent",
+    "strategy_synthesis_heading": "Sinteza strategiilor",
+    "strategy_final_signal_label": "Semnal final",
+    "strategy_consensus_level_label": "Consens",
+    "strategy_conflict_label": "Conflict",
+    "strategy_confidence_label": "Încredere",
+    "strategy_summary_label": "Rezumat",
+    "strategy_supporting_skills_label": "Strategii favorabile",
+    "strategy_opposing_skills_label": "Strategii contrare",
+    "strategy_invalid_opinions_label": (
+        "{count} strategii suplimentare nu au produs semnale valide"
+    ),
+}
+
+_PLACEHOLDER_BY_LANGUAGE["ro"] = "De completat"
+_UNKNOWN_BY_LANGUAGE["ro"] = "Necunoscut"
+_NO_DATA_BY_LANGUAGE["ro"] = "Date indisponibile"
+_CHIP_UNAVAILABLE_BY_LANGUAGE["ro"] = (
+    "Distribuția pozițiilor este dezactivată sau temporar indisponibilă; "
+    "aceste semnale nu au fost folosite."
+)
+_GENERIC_STOCK_NAME_BY_LANGUAGE["ro"] = "Acțiune fără nume"
 
 def _strip_decision_negation_connectors(text: str) -> str:
     """Remove common advisory connectors between a negation token and decision word."""
@@ -835,7 +987,14 @@ def is_supported_report_language_value(value: Optional[str]) -> bool:
 def get_report_labels(language: Optional[str]) -> Dict[str, str]:
     """Return UI copy for the selected report language."""
     normalized = normalize_report_language(language)
-    return _REPORT_LABELS[normalized]
+
+    if normalized == "ro":
+        return {
+            **_REPORT_LABELS["en"],
+            **_REPORT_LABELS_RO,
+        }
+
+    return _REPORT_LABELS.get(normalized, _REPORT_LABELS["en"])
 
 
 def get_placeholder_text(language: Optional[str]) -> str:
@@ -961,7 +1120,8 @@ def _translate_from_map(
 
     canonical = _canonicalize_lookup_value(raw_text, canonical_map)
     if canonical:
-        return translations[canonical][normalized_language]
+        localized = translations[canonical]
+        return localized.get(normalized_language) or localized.get("en") or raw_text
     return raw_text
 
 
