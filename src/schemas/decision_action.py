@@ -30,14 +30,14 @@ _ACTION_VALUES = set(get_args(DecisionAction))
 _NON_STOCK_REPORT_TYPES = {"market_review"}
 
 _ACTION_LABELS: Dict[str, Dict[str, str]] = {
-    "buy": {"zh": "买入", "en": "Buy", "ko": "매수"},
-    "add": {"zh": "加仓", "en": "Add", "ko": "추가 매수"},
-    "hold": {"zh": "持有", "en": "Hold", "ko": "보유"},
-    "reduce": {"zh": "减仓", "en": "Reduce", "ko": "비중축소"},
-    "sell": {"zh": "卖出", "en": "Sell", "ko": "매도"},
-    "watch": {"zh": "观望", "en": "Watch", "ko": "관망"},
-    "avoid": {"zh": "回避", "en": "Avoid", "ko": "회피"},
-    "alert": {"zh": "预警", "en": "Alert", "ko": "경고"},
+    "buy": {"zh": "买入", "en": "Buy", "ko": "매수", "ro": "Cumpără"},
+    "add": {"zh": "加仓", "en": "Add", "ko": "추가 매수", "ro": "Adaugă"},
+    "hold": {"zh": "持有", "en": "Hold", "ko": "보유", "ro": "Păstrează"},
+    "reduce": {"zh": "减仓", "en": "Reduce", "ko": "비중축소", "ro": "Redu"},
+    "sell": {"zh": "卖出", "en": "Sell", "ko": "매도", "ro": "Vinde"},
+    "watch": {"zh": "观望", "en": "Watch", "ko": "관망", "ro": "Urmărește"},
+    "avoid": {"zh": "回避", "en": "Avoid", "ko": "회피", "ro": "Evită"},
+    "alert": {"zh": "预警", "en": "Alert", "ko": "경고", "ro": "Alertă"},
 }
 
 _EXPLICIT_ALIASES: Dict[str, DecisionAction] = {
@@ -362,7 +362,11 @@ def localize_action_label(action: Any, language: Optional[str] = "zh") -> Option
     normalized = _explicit_action(action)
     if not normalized:
         return None
-    return _ACTION_LABELS[normalized][normalize_report_language(language)]
+
+    language_code = normalize_report_language(language)
+    labels = _ACTION_LABELS[normalized]
+
+    return labels.get(language_code) or labels.get("en")
 
 
 def build_action_fields(
