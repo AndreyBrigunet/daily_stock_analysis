@@ -2129,15 +2129,23 @@ class NotificationService(
         "sina": {"zh": "新浪财经", "en": "Sina Finance"},
         "stooq": {"zh": "Stooq", "en": "Stooq"},
         "longbridge": {"zh": "长桥", "en": "Longbridge"},
-        "fallback": {"zh": "降级兜底", "en": "Fallback"},
+        "fallback": {"zh": "降级兜底", "en": "Fallback", "ro": "Sursă de rezervă"},
     }
 
     def _get_source_display_name(self, source: Any, language: Optional[str]) -> str:
         raw_source = str(source or "N/A")
         mapping = self._SOURCE_DISPLAY_NAMES.get(raw_source)
+   
         if not mapping:
             return raw_source
-        return mapping[normalize_report_language(language)]
+   
+        language_code = normalize_report_language(language)
+   
+        return (
+            mapping.get(language_code)
+            or mapping.get("en")
+            or raw_source
+        )
 
     def _append_market_snapshot(self, lines: List[str], result: AnalysisResult) -> None:
         snapshot = getattr(result, 'market_snapshot', None)
