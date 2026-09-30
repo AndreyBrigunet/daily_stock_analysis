@@ -966,6 +966,61 @@ def _strip_decision_negation_connectors(text: str) -> str:
                 break
     return suffix
 
+# Romanian deterministic translations
+for key, value in {
+    "strong_bullish": "Puternic ascendent",
+    "bullish": "Ascendent",
+    "sideways": "Lateral",
+    "bearish": "Descendent",
+    "strong_bearish": "Puternic descendent",
+}.items():
+    _TREND_PREDICTION_TRANSLATIONS[key]["ro"] = value
+
+for key, value in {
+    "high": "Ridicată",
+    "medium": "Medie",
+    "low": "Scăzută",
+}.items():
+    _CONFIDENCE_LEVEL_TRANSLATIONS[key]["ro"] = value
+
+for key, value in {
+    "strong_buy": "Cumpărare puternică",
+    "buy": "Cumpără",
+    "hold": "Păstrează",
+    "sell": "Vinde",
+    "strong_sell": "Vânzare puternică",
+}.items():
+    _STRATEGY_SIGNAL_TRANSLATIONS[key]["ro"] = value
+
+for key, value in {
+    "high": "Ridicat",
+    "medium": "Mediu",
+    "low": "Scăzut",
+    "insufficient": "Dovezi insuficiente",
+}.items():
+    _CONSENSUS_LEVEL_TRANSLATIONS[key]["ro"] = value
+
+for key, value in {
+    "none": "Niciunul",
+    "low": "Scăzut",
+    "medium": "Mediu",
+    "high": "Ridicat",
+}.items():
+    _CONFLICT_SEVERITY_TRANSLATIONS[key]["ro"] = value
+
+for key, value in {
+    "healthy": "Bună",
+    "average": "Medie",
+    "caution": "Atenție",
+}.items():
+    _CHIP_HEALTH_TRANSLATIONS[key]["ro"] = value
+
+for key, value in {
+    "safe": "Sigur",
+    "caution": "Atenție",
+    "danger": "Pericol",
+}.items():
+    _BIAS_STATUS_TRANSLATIONS[key]["ro"] = value
 
 def normalize_report_language(value: Optional[str], default: str = "zh") -> str:
     """Normalize report language to a supported short code."""
@@ -1251,25 +1306,41 @@ def localize_strategy_conflict_description(conflict_type: Any, language: Optiona
             "zh": "策略方向出现对立：部分策略看多，部分策略看空，综合结论需要降低确定性。",
             "en": "Strategy directions diverge: some strategies are bullish while others are bearish, so conviction should be reduced.",
             "ko": "전략 방향이 엇갈립니다. 일부 전략은 상승을, 일부 전략은 하락을 보며 확신도를 낮춰야 합니다.",
+            "ro": (
+                "Direcțiile strategiilor sunt opuse: unele indică o perspectivă ascendentă, "
+                "iar altele una descendentă, deci nivelul de încredere trebuie redus."
+            ),
         },
         "wide_score_dispersion": {
             "zh": "策略信号分数分布较宽，说明多策略对行情结构存在明显分歧。",
             "en": "Strategy signal scores are widely dispersed, indicating meaningful disagreement on market structure.",
             "ko": "전략 신호 점수 분포가 넓어 시장 구조에 대한 전략 간 이견이 큽니다.",
+            "ro": (
+                "Scorurile strategiilor sunt foarte dispersate, ceea ce indică diferențe "
+                "semnificative în interpretarea structurii pieței."
+            ),
         },
         "high_confidence_dissent": {
             "zh": "存在高置信少数派策略与综合信号明显不一致，应保留反方观点。",
             "en": "A high-confidence minority strategy materially disagrees with the final signal and should be kept as a dissenting view.",
             "ko": "높은 확신도의 소수 전략이 종합 신호와 크게 달라 반대 관점으로 보존해야 합니다.",
+            "ro": (
+                "O strategie minoritară cu încredere ridicată diferă semnificativ de "
+                "semnalul final și trebuie păstrată ca opinie contrară."
+            ),
         },
         "adjustment_contradiction": {
             "zh": "策略加减分方向相互矛盾，说明不同策略对同一标的的边际评分分歧较大。",
             "en": "Strategy score adjustments contradict each other, showing large disagreement in marginal scoring.",
             "ko": "전략별 점수 조정 방향이 서로 충돌해 동일 종목의 한계 평가 차이가 큽니다.",
+            "ro": (
+                "Ajustările de scor ale strategiilor se contrazic, ceea ce indică "
+                "diferențe mari în evaluarea aceleiași acțiuni."
+            ),
         },
     }
     localized = translations.get(key, {})
-    return localized.get(lang) or localized.get("zh") or key
+    return localized.get(lang) or localized.get("en") or key
 
 
 def normalize_strategy_synthesis_payload(value: Any) -> Dict[str, Any]:
@@ -1349,6 +1420,16 @@ def localize_strategy_synthesis_summary(strategy_synthesis: Any, language: Optio
         else:
             base = f"{opinion_count}개 전략의 종합 판단: 종합 신호는 {final_signal}, 공감도는 {consensus_level}, 감지된 전략 충돌은 없습니다."
         return base
+    if lang == "ro":
+        if conflict_count:
+            return (
+                f"Sinteză din {opinion_count} strategii: semnal final {final_signal}, "
+                f"consens {consensus_level}, severitatea conflictului {conflict_severity}."
+            )
+        return (
+            f"Sinteză din {opinion_count} strategii: semnal final {final_signal}, "
+            f"consens {consensus_level}, fără conflicte detectate."
+        )
     if conflict_count:
         base = f"来自 {opinion_count} 个策略的综合判断：综合信号为{final_signal}，共识度为{consensus_level}，冲突强度为{conflict_severity}。"
     else:
