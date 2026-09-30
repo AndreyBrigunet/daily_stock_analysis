@@ -41,11 +41,20 @@ _KO_ZERO_RESULTS = (
     "⚠️ 이번 분석에서 사용 가능한 뉴스 데이터를 가져오지 못해 "
     "아래 결론에는 뉴스 근거를 반영하지 않았습니다."
 )
+_RO_NOT_CONFIGURED = (
+    "⚠️ Nu este configurat niciun canal de căutare a știrilor; "
+    "această analiză nu include dovezi bazate pe știri."
+)
+_RO_ZERO_RESULTS = (
+    "⚠️ Nu au putut fi obținute date de știri pentru această rulare; "
+    "concluziile de mai jos nu includ dovezi din știri."
+)
 
 _DISCLOSURES = {
     "zh": (_ZH_NOT_CONFIGURED, _ZH_ZERO_RESULTS),
     "en": (_EN_NOT_CONFIGURED, _EN_ZERO_RESULTS),
     "ko": (_KO_NOT_CONFIGURED, _KO_ZERO_RESULTS),
+    "ro": (_RO_NOT_CONFIGURED, _RO_ZERO_RESULTS),
 }
 
 if set(_DISCLOSURES) != set(SUPPORTED_REPORT_LANGUAGES):
