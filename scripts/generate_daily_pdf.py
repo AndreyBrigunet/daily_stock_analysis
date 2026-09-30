@@ -46,6 +46,8 @@ class Stock:
     score: int | None = None
     trend: str = "N/A"
     signal: str = "N/A"
+    report_price: float | None = None
+    report_change_pct: float | None = None
 
 
 def newest_file(files: Iterable[Path]) -> Path | None:
@@ -72,8 +74,34 @@ def no_emoji(value: str) -> str:
     ).strip()
 
 
+def normalize_report_text(value: str) -> str:
+    """Normalize raw report Markdown and Telegram-exported Markdown without losing data."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+    # Telegram transcript exports may prefix each message with a timestamp/bot name.
+    text = re.sub(
+        r"^\[\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2}\]\s+[^:\n]+:\s*",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+
+    normalized_lines: list[str] = []
+    for line in text.splitlines():
+        # Telegram transcript copied from chat often ends every visual line with "\\".
+        if line.endswith("\\"):
+            line = line[:-1]
+        normalized_lines.append(line)
+    text = "\n".join(normalized_lines)
+
+    # Undo one or more Telegram escape backslashes before Markdown punctuation.
+    text = re.sub(r"\\+([()|>\[\]-])", r"\1", text)
+
+    return text.strip()
+
+
 def strip_md(value: str) -> str:
-    text = no_emoji(value)
+    text = no_emoji(normalize_report_text(value))
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"[*_`>#~]", "", text)
     text = re.sub(r"\s+", " ", text)
@@ -121,6 +149,74 @@ def icon(name: str, size: int = 18, color: str = TEXT) -> str:
     return common + paths.get(name, paths["info"]) + end
 
 
+def _parse_number(value: str) -> float | None:
+    raw = strip_md(value).replace("$", "").replace("€", "").replace("%", "")
+    raw = raw.replace(",", "").strip()
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", raw)
+    if not match:
+        return None
+    try:
+        return float(match.group(0))
+    except ValueError:
+        return None
+
+
+def _split_pipe_row(line: str) -> list[str]:
+    row = normalize_report_text(line).strip().strip("|")
+    return [cell.strip() for cell in row.split("|")]
+
+
+def _markdown_tables(markdown_text: str) -> list[tuple[list[str], list[str]]]:
+    """Return first data row for each Markdown table found in the report."""
+    lines = normalize_report_text(markdown_text).splitlines()
+    tables: list[tuple[list[str], list[str]]] = []
+    for idx in range(len(lines) - 2):
+        header_line = lines[idx].strip()
+        separator_line = lines[idx + 1].strip()
+        data_line = lines[idx + 2].strip()
+        if "|" not in header_line or "|" not in data_line:
+            continue
+        sep_cells = _split_pipe_row(separator_line)
+        if not sep_cells or not all(re.fullmatch(r":?-{3,}:?", c.replace(" ", "")) for c in sep_cells):
+            continue
+        headers = _split_pipe_row(header_line)
+        values = _split_pipe_row(data_line)
+        if headers and values and len(values) >= min(2, len(headers)):
+            tables.append((headers, values))
+    return tables
+
+
+def _extract_report_snapshot(details: str) -> tuple[float | None, float | None]:
+    """Extract the price/change shown in the analysis report itself.
+
+    This intentionally takes precedence over Yahoo's later price so the PDF and
+    Telegram report describe the exact same analysis snapshot.
+    """
+    close_aliases = {
+        "close", "price", "current price", "închidere", "pret", "preț", "preț curent",
+    }
+    change_aliases = {
+        "change %", "change%", "variație %", "variatie %", "schimbare %",
+    }
+    price: float | None = None
+    change_pct: float | None = None
+
+    for headers, values in _markdown_tables(details):
+        mapping = {
+            strip_md(h).lower().replace("\\", ""): values[i] if i < len(values) else ""
+            for i, h in enumerate(headers)
+        }
+        for key, value in mapping.items():
+            if price is None and key in close_aliases:
+                price = _parse_number(value)
+            if change_pct is None and key in change_aliases:
+                change_pct = _parse_number(value)
+        if price is not None and change_pct is not None:
+            break
+
+    return price, change_pct
+
+
 def _extract_stock_meta(details: str) -> tuple[int | None, str, str]:
     clean = strip_md(details)
 
@@ -139,7 +235,7 @@ def _extract_stock_meta(details: str) -> tuple[int | None, str, str]:
     ]
     lower = clean.lower()
     for candidate in signal_candidates:
-        if candidate.lower() in lower:
+        if re.search(rf"\b{re.escape(candidate.lower())}\b", lower):
             signal = candidate
             break
 
@@ -149,7 +245,7 @@ def _extract_stock_meta(details: str) -> tuple[int | None, str, str]:
         "Strong Bullish", "Strong Bearish", "Bullish", "Bearish", "Sideways",
     ]
     for candidate in trend_candidates:
-        if candidate.lower() in lower:
+        if re.search(rf"\b{re.escape(candidate.lower())}\b", lower):
             trend = candidate
             break
 
@@ -157,85 +253,161 @@ def _extract_stock_meta(details: str) -> tuple[int | None, str, str]:
 
 
 def parse_stocks(stock_md: str) -> list[Stock]:
-    """Parse stock sections generated by NotificationService.generate_dashboard_report()."""
-    lines = stock_md.splitlines()
-    starts: list[tuple[int, str, str]] = []
+    """Parse every stock and preserve its entire report body.
 
-    # Summary lines look like:
-    # 🟢 **Apple Inc.(AAPL)**: Păstrează | Scor 74 | Ascendent
-    summary_meta: dict[str, tuple[int | None, str, str]] = {}
+    Supports both the raw Markdown saved by NotificationService and text copied
+    back from Telegram, where parentheses/pipes can be escaped and Markdown
+    headings are no longer visible.
+    """
+    normalized = normalize_report_text(stock_md)
+    lines = normalized.splitlines()
+
+    # Summary example:
+    # **Apple Inc. (AAPL)**: Watch | Score 47 | Sideways
+    summary_meta: dict[str, dict[str, object]] = {}
     summary_re = re.compile(
-        r"\*\*.*?\(([A-Za-z0-9.\-^=]+)\)\*\*\s*:\s*(.*?)\s*\|\s*"
-        r"(?:Scor|Score)\s*(\d{1,3})\s*\|\s*(.+?)\s*$",
+        r"\*\*(?P<name>.+?)\s*\((?P<ticker>[A-Za-z0-9.\-^=]+)\)\*\*\s*:\s*"
+        r"(?P<signal>.*?)\s*\|\s*(?:Scor|Score)\s*(?P<score>\d{1,3})\s*\|\s*"
+        r"(?P<trend>.+?)\s*$",
         re.I,
     )
     for line in lines:
         m = summary_re.search(line.strip())
         if not m:
             continue
-        ticker = m.group(1).upper()
-        signal = strip_md(m.group(2)) or "N/A"
-        score = max(0, min(100, int(m.group(3))))
-        trend = strip_md(m.group(4)) or "N/A"
-        summary_meta[ticker] = (score, trend, signal)
+        ticker = m.group("ticker").upper()
+        summary_meta[ticker] = {
+            "name": strip_md(m.group("name")) or ticker,
+            "score": max(0, min(100, int(m.group("score")))),
+            "signal": strip_md(m.group("signal")) or "N/A",
+            "trend": strip_md(m.group("trend")) or "N/A",
+        }
 
-    # Detailed heading shape: ## 🟢 Apple Inc. (AAPL)
-    heading_re = re.compile(r"^##\s+(.+?)\s*\(([A-Za-z0-9.\-^=]+)\)\s*$")
+    # Detailed boundary examples accepted:
+    # ## ⚪ Apple Inc. (AAPL)
+    # ## ⚪ **Apple Inc. (AAPL)**
+    # ⚪ Apple Inc. (AAPL)       (Telegram transcript)
+    boundary_re = re.compile(r"^(?P<name>.+?)\s*\((?P<ticker>[A-Za-z0-9.\-^=]+)\)\s*$")
+    starts: list[tuple[int, str, str]] = []
     for idx, line in enumerate(lines):
-        match = heading_re.match(line.strip())
-        if not match:
+        raw = line.strip()
+        if not raw or ":" in raw or "|" in raw:
             continue
-        name = strip_md(match.group(1)) or match.group(2).upper()
-        ticker = match.group(2).upper()
+        structural = strip_md(raw)
+        m = boundary_re.match(structural)
+        if not m:
+            continue
+        ticker = m.group("ticker").upper()
+        # If a summary exists, only accept its tickers. Otherwise require a real Markdown heading.
+        if summary_meta and ticker not in summary_meta:
+            continue
+        if not summary_meta and not raw.lstrip().startswith("#"):
+            continue
+        name = strip_md(m.group("name")) or ticker
         starts.append((idx, name, ticker))
 
+    # De-duplicate accidental repeated boundaries while preserving order.
+    deduped: list[tuple[int, str, str]] = []
+    seen_tickers: set[str] = set()
+    for item in starts:
+        if item[2] in seen_tickers:
+            continue
+        seen_tickers.add(item[2])
+        deduped.append(item)
+    starts = deduped
+
     stocks: list[Stock] = []
-    for pos, (start, name, ticker) in enumerate(starts):
+    for pos, (start, heading_name, ticker) in enumerate(starts):
         end = starts[pos + 1][0] if pos + 1 < len(starts) else len(lines)
         details = "\n".join(lines[start + 1 : end]).strip()
         detail_score, detail_trend, detail_signal = _extract_stock_meta(details)
-        score, trend, signal = summary_meta.get(
-            ticker,
-            (detail_score, detail_trend, detail_signal),
-        )
+        summary = summary_meta.get(ticker, {})
+        name = str(summary.get("name") or heading_name or ticker)
+        score = summary.get("score", detail_score)
+        trend = str(summary.get("trend") or detail_trend or "N/A")
+        signal = str(summary.get("signal") or detail_signal or "N/A")
         if trend == "N/A" and detail_trend != "N/A":
             trend = detail_trend
         if signal == "N/A" and detail_signal != "N/A":
             signal = detail_signal
+        report_price, report_change_pct = _extract_report_snapshot(details)
         stocks.append(
             Stock(
                 ticker=ticker,
                 name=name,
                 details=details,
-                score=score,
+                score=int(score) if isinstance(score, int) else detail_score,
                 trend=trend,
                 signal=signal,
+                report_price=report_price,
+                report_change_pct=report_change_pct,
             )
         )
 
+    # If detailed boundaries could not be found but the summary is valid, fail safely later
+    # instead of silently manufacturing empty report pages from STOCK_LIST.
     return stocks
 
 
+_SECTION_TITLES = {
+    # English
+    "key updates", "core conclusion", "market snapshot", "data view",
+    "phase decision guardrail", "battle plan", "signal attribution",
+    "strategy synthesis", "financial summary", "shareholder return", "related boards",
+    # Romanian
+    "actualizări importante", "actualizari importante", "concluzie principală",
+    "concluzie principala", "situația pieței", "situatia pietei", "analiza datelor",
+    "decizie în funcție de faza pieței", "decizie in functie de faza pietei",
+    "plan de acțiune", "plan de actiune", "atribuirea semnalului", "sinteza strategiilor",
+    "rezumat financiar", "randament pentru acționari", "randament pentru actionari",
+    "sectoare asociate",
+}
+
+
 def _split_sections(markdown_text: str, level: int = 3) -> list[tuple[str, str]]:
+    """Split without dropping any report content."""
+    text = normalize_report_text(markdown_text)
     marker = "#" * level
-    heading = re.compile(rf"^{re.escape(marker)}\s+(.+?)\s*$")
+    markdown_heading = re.compile(rf"^{re.escape(marker)}\s+(.+?)\s*$")
     sections: list[tuple[str, str]] = []
     title: str | None = None
     body: list[str] = []
+    preamble: list[str] = []
 
-    for line in markdown_text.splitlines():
-        m = heading.match(line.strip())
-        if m:
-            if title is not None:
-                sections.append((strip_md(title), "\n".join(body).strip()))
-            title = m.group(1)
-            body = []
-        elif title is not None:
+    def flush() -> None:
+        nonlocal body, title
+        if title is not None:
+            content = "\n".join(body).strip()
+            if content:
+                sections.append((strip_md(title), content))
+        body = []
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        md_match = markdown_heading.match(stripped)
+        plain_title = strip_md(stripped).lower()
+        is_plain_section = plain_title in _SECTION_TITLES
+
+        if md_match or is_plain_section:
+            if title is None and preamble:
+                pre = "\n".join(preamble).strip()
+                if pre:
+                    sections.append(("Rezumat", pre))
+                preamble = []
+            flush()
+            title = md_match.group(1) if md_match else stripped
+            continue
+
+        if title is None:
+            preamble.append(line)
+        else:
             body.append(line)
 
-    if title is not None:
-        sections.append((strip_md(title), "\n".join(body).strip()))
+    if title is None:
+        full = "\n".join(preamble).strip()
+        return [("Analiză completă", full)] if full else []
 
+    flush()
     return [(t, b) for t, b in sections if t and b]
 
 
@@ -243,15 +415,15 @@ def market_sections(markdown_text: str) -> list[tuple[str, str]]:
     sections = _split_sections(markdown_text, 3)
     if sections:
         return sections
-    # Graceful fallback if upstream changed heading depth.
-    return [("Contextul pieței", markdown_text.strip())] if markdown_text.strip() else []
+    return [("Contextul pieței", normalize_report_text(markdown_text))] if markdown_text.strip() else []
 
 
 def stock_sections(markdown_text: str) -> list[tuple[str, str]]:
     sections = _split_sections(markdown_text, 3)
     if sections:
         return sections
-    return [("Analiză", markdown_text.strip())] if markdown_text.strip() else []
+    full = normalize_report_text(markdown_text)
+    return [("Analiză completă", full)] if full else []
 
 
 def _normalize_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
@@ -312,6 +484,21 @@ def price_snapshot(df: pd.DataFrame) -> tuple[str, str, str]:
     pct = ((current / previous) - 1.0) * 100.0 if previous else 0.0
     cls = "positive" if pct > 0 else "negative" if pct < 0 else "neutral"
     return f"${current:,.2f}", f"{pct:+.2f}%", cls
+
+
+def stock_price_snapshot(stock: Stock, df: pd.DataFrame) -> tuple[str, str, str]:
+    """Prefer the exact analysis snapshot from the Markdown report.
+
+    Yahoo data is only a fallback for display and remains the source for the 3-month chart.
+    """
+    if stock.report_price is not None:
+        price = f"${stock.report_price:,.2f}"
+        if stock.report_change_pct is None:
+            return price, "N/A", "neutral"
+        pct = stock.report_change_pct
+        cls = "positive" if pct > 0 else "negative" if pct < 0 else "neutral"
+        return price, f"{pct:+.2f}%", cls
+    return price_snapshot(df)
 
 
 def _svg_empty(message: str, width: int, height: int) -> str:
@@ -501,6 +688,48 @@ def section_card(title: str, body: str) -> str:
     )
 
 
+def detail_layout(sections: list[tuple[str, str]]) -> str:
+    """Render all sections without putting the whole report in one unbreakable table row.
+
+    Short cards are paired into two columns. Long/data-heavy cards are full width so
+    wkhtmltopdf can paginate them safely instead of clipping content.
+    """
+    chunks: list[str] = []
+    pending: tuple[str, str] | None = None
+
+    def is_large(body: str) -> bool:
+        normalized = normalize_report_text(body)
+        return len(normalized) > 1500 or normalized.count("\n|") >= 7 or normalized.count("\n-") >= 8
+
+    def flush_pending() -> None:
+        nonlocal pending
+        if pending is not None:
+            chunks.append(f'<div class="detail-full">{section_card(*pending)}</div>')
+            pending = None
+
+    for section in sections:
+        if is_large(section[1]):
+            flush_pending()
+            chunks.append(f'<div class="detail-full">{section_card(*section)}</div>')
+            continue
+
+        if pending is None:
+            pending = section
+            continue
+
+        left = section_card(*pending)
+        right = section_card(*section)
+        chunks.append(
+            '<table class="cols detail-row"><tr>'
+            f'<td>{left}</td><td>{right}</td>'
+            '</tr></table>'
+        )
+        pending = None
+
+    flush_pending()
+    return "".join(chunks)
+
+
 def _first_meaningful_paragraph(markdown_text: str, limit: int = 640) -> str:
     sections = market_sections(markdown_text)
     source = sections[0][1] if sections else markdown_text
@@ -535,7 +764,7 @@ def executive(stocks: list[Stock], market_md: str, stock_data: dict[str, pd.Data
     cards: list[str] = []
     for s in stocks[:3]:
         df = stock_data.get(s.ticker, pd.DataFrame())
-        px, change, cls = price_snapshot(df)
+        px, change, cls = stock_price_snapshot(s, df)
         score_text = str(s.score) if s.score is not None else "N/A"
         cards.append(
             '<td><div class="stock-card">'
@@ -579,9 +808,8 @@ def _market_snapshot_cards(market_data: dict[str, pd.DataFrame]) -> str:
 
 
 def market_page(text: str, market_data: dict[str, pd.DataFrame]) -> str:
-    cards = [section_card(title, body) for title, body in market_sections(text)]
-    left = "".join(cards[::2])
-    right = "".join(cards[1::2])
+    sections = market_sections(text)
+    details_html = detail_layout(sections)
     sp = market_data.get("^GSPC", pd.DataFrame())
     nd = market_data.get("^IXIC", pd.DataFrame())
 
@@ -589,16 +817,15 @@ def market_page(text: str, market_data: dict[str, pd.DataFrame]) -> str:
 <div class="page-title">{icon('chart', 22, BLUE)}<div><div class="eyebrow">MARKET OVERVIEW</div><h2>Recapitularea pieței SUA</h2></div></div>
 {_market_snapshot_cards(market_data)}
 <div class="chart-card"><div class="chart-head"><div><b>S&P 500 + Nasdaq</b><small>ultimele 3 luni · performanță normalizată (100 = început)</small></div>{icon('trend', 19, BLUE)}</div>{market_chart(sp, nd)}</div>
-<table class="cols"><tr><td>{left}</td><td>{right}</td></tr></table>
+{details_html}
 <div class="foot"><span>Market overview</span><span>Nu constituie recomandare de investiții.</span></div>
 </section>'''
 
 
 def stock_page(stock: Stock, df: pd.DataFrame) -> str:
-    px, change, cls = price_snapshot(df)
-    cards = [section_card(title, body) for title, body in stock_sections(stock.details)]
-    left = "".join(cards[::2])
-    right = "".join(cards[1::2])
+    px, change, cls = stock_price_snapshot(stock, df)
+    sections = stock_sections(stock.details)
+    details_html = detail_layout(sections)
     score_text = f"{stock.score}/100" if stock.score is not None else "N/A"
     risk_text = risk(stock.details)
 
@@ -614,7 +841,7 @@ def stock_page(stock: Stock, df: pd.DataFrame) -> str:
 <td><small>Semnal</small><b>{html.escape(stock.signal)}</b></td>
 <td><small>Risc</small><b>{html.escape(risk_text)}</b></td>
 </tr></table>
-<table class="cols"><tr><td>{left}</td><td>{right}</td></tr></table>
+{details_html}
 <div class="foot"><span>{html.escape(stock.ticker)} · raport detaliat</span><span>Nu constituie recomandare de investiții.</span></div>
 </section>'''
 
@@ -625,7 +852,7 @@ CSS = r'''
 html,body{margin:0;padding:0}
 body{font-family:"DejaVu Sans","Noto Sans",Arial,sans-serif;background:#F8FAFC;color:#0F172A;font-size:10pt;line-height:1.45}
 .page{min-height:260mm;padding:2mm 1mm 7mm;position:relative;page-break-after:always}
-.page:last-child{page-break-after:auto}.break{}.icon{vertical-align:-3px}.eyebrow{font-size:8pt;letter-spacing:1.45px;color:#2563EB;font-weight:700;margin-bottom:4px}h1{font-size:25pt;margin:0;line-height:1.12}h2{font-size:18pt;margin:0}.top{display:table;width:100%;margin-bottom:12px}.top>div{display:table-cell;vertical-align:top}.top p{color:#64748B;margin:6px 0}.time{text-align:right;color:#64748B;font-size:8.4pt;white-space:nowrap}.kpi-row,.stocks-row,.stock-kpis,.market-kpis,.cols{width:100%;table-layout:fixed;border-collapse:separate}.kpi-row{border-spacing:5px;margin-bottom:12px}.kpi{background:white;border:1px solid #E2E8F0;border-radius:11px;padding:9px;min-height:66px}.kpi-icon{float:right}.kpi small,.stock-kpis small,.market-kpis small{display:block;color:#64748B;font-size:7.6pt}.kpi strong{display:block;font-size:14pt;margin-top:7px}.summary,.content-card,.chart-card,.stock-card,.market-kpi{background:white;border:1px solid #E2E8F0;border-radius:12px}.summary{padding:11px 13px;margin-bottom:13px}.summary p{color:#334155;margin:6px 0 0;font-size:9.2pt}.label{text-transform:uppercase;letter-spacing:1px;color:#64748B;font-size:7.8pt;font-weight:700;margin-bottom:6px}.stocks-row{border-spacing:5px}.stocks-row td{vertical-align:top}.stock-card{padding:9px;min-height:218px}.stock-top{display:table;width:100%}.stock-top>div{display:table-cell}.stock-top b{display:block;font-size:13.5pt}.stock-top small{display:block;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:128px}.stock-top .badge{float:right}.price{font-size:13pt;font-weight:700;margin:7px 0 3px}.price span{font-size:8.3pt;margin-left:5px}.positive{color:#16A34A}.negative{color:#DC2626}.neutral{color:#64748B}.micro{display:table;width:100%;background:#F8FAFC;border-radius:7px;padding:5px}.micro span{display:table-cell;width:50%;font-size:7.4pt;color:#64748B}.micro b{color:#0F172A}.badge{display:inline-block;border-radius:999px;padding:4px 7px;font-size:7.1pt;font-weight:700;border:1px solid}.badge-positive{color:#166534;background:#F0FDF4;border-color:#BBF7D0}.badge-negative{color:#991B1B;background:#FEF2F2;border-color:#FECACA}.badge-warning{color:#92400E;background:#FFFBEB;border-color:#FDE68A}.foot{position:absolute;bottom:1.5mm;left:1mm;right:1mm;border-top:1px solid #E2E8F0;padding-top:5px;color:#94A3B8;font-size:6.8pt}.foot span:last-child{float:right}.page-title{display:table;width:100%;margin-bottom:9px}.page-title>svg,.page-title>div{display:table-cell;vertical-align:middle}.page-title>div{padding-left:8px}.market-kpis{border-spacing:5px;margin-bottom:9px}.market-kpi{padding:7px 9px}.market-kpi b{display:block;font-size:10.5pt;margin-top:2px}.market-kpi span{font-size:7.5pt}.chart-card{padding:9px 11px;margin-bottom:9px}.chart-head{display:table;width:100%;margin-bottom:5px}.chart-head>div,.chart-head>svg{display:table-cell;vertical-align:middle}.chart-head small{display:block;color:#64748B;font-size:7.6pt;margin-top:2px}.chart-head>svg{float:right}.chart-svg{width:100%;height:auto;display:block}.cols{border-spacing:5px}.cols>tbody>tr>td{width:50%;vertical-align:top}.content-card{padding:8px 9px;margin-bottom:7px;page-break-inside:avoid}.card-title{border-bottom:1px solid #F1F5F9;padding-bottom:5px;margin-bottom:4px;font-weight:700;font-size:9pt}.card-title span{margin-left:5px}.markdown{font-size:8.05pt;color:#334155}.markdown p{margin:3px 0 4px}.markdown ul,.markdown ol{margin:3px 0 5px 16px;padding:0}.markdown li{margin:1px 0}.markdown blockquote{margin:4px 0;padding:4px 6px;background:#F8FAFC;border-left:3px solid #93C5FD}.markdown table{width:100%;border-collapse:collapse;margin:5px 0;table-layout:fixed}.markdown th,.markdown td{border-bottom:1px solid #E2E8F0;padding:3px 4px;text-align:left;vertical-align:top;word-wrap:break-word}.markdown th{font-size:7pt;color:#64748B;background:#F8FAFC}.markdown h1,.markdown h2,.markdown h3,.markdown h4{font-size:8.8pt;margin:5px 0 3px}.hero{display:table;width:100%;margin-bottom:8px}.hero>div{display:table-cell;vertical-align:top}.ticker-big{font-size:23pt;font-weight:800}.name-big{color:#64748B;margin-top:1px}.hero-right{text-align:right}.price-big{font-size:17pt;font-weight:750}.hero-right>.badge{margin-left:5px}.stock-kpis{border-spacing:5px;margin-bottom:8px}.stock-kpis td{width:25%;background:white;border:1px solid #E2E8F0;border-radius:9px;padding:7px 8px}.stock-kpis b{display:block;margin-top:2px;font-size:9.2pt}
+.page:last-child{page-break-after:auto}.break{}.icon{vertical-align:-3px}.eyebrow{font-size:8pt;letter-spacing:1.45px;color:#2563EB;font-weight:700;margin-bottom:4px}h1{font-size:25pt;margin:0;line-height:1.12}h2{font-size:18pt;margin:0}.top{display:table;width:100%;margin-bottom:12px}.top>div{display:table-cell;vertical-align:top}.top p{color:#64748B;margin:6px 0}.time{text-align:right;color:#64748B;font-size:8.4pt;white-space:nowrap}.kpi-row,.stocks-row,.stock-kpis,.market-kpis,.cols{width:100%;table-layout:fixed;border-collapse:separate}.kpi-row{border-spacing:5px;margin-bottom:12px}.kpi{background:white;border:1px solid #E2E8F0;border-radius:11px;padding:9px;min-height:66px}.kpi-icon{float:right}.kpi small,.stock-kpis small,.market-kpis small{display:block;color:#64748B;font-size:7.6pt}.kpi strong{display:block;font-size:14pt;margin-top:7px}.summary,.content-card,.chart-card,.stock-card,.market-kpi{background:white;border:1px solid #E2E8F0;border-radius:12px}.summary{padding:11px 13px;margin-bottom:13px}.summary p{color:#334155;margin:6px 0 0;font-size:9.2pt}.label{text-transform:uppercase;letter-spacing:1px;color:#64748B;font-size:7.8pt;font-weight:700;margin-bottom:6px}.stocks-row{border-spacing:5px}.stocks-row td{vertical-align:top}.stock-card{padding:9px;min-height:218px}.stock-top{display:table;width:100%}.stock-top>div{display:table-cell}.stock-top b{display:block;font-size:13.5pt}.stock-top small{display:block;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:128px}.stock-top .badge{float:right}.price{font-size:13pt;font-weight:700;margin:7px 0 3px}.price span{font-size:8.3pt;margin-left:5px}.positive{color:#16A34A}.negative{color:#DC2626}.neutral{color:#64748B}.micro{display:table;width:100%;background:#F8FAFC;border-radius:7px;padding:5px}.micro span{display:table-cell;width:50%;font-size:7.4pt;color:#64748B}.micro b{color:#0F172A}.badge{display:inline-block;border-radius:999px;padding:4px 7px;font-size:7.1pt;font-weight:700;border:1px solid}.badge-positive{color:#166534;background:#F0FDF4;border-color:#BBF7D0}.badge-negative{color:#991B1B;background:#FEF2F2;border-color:#FECACA}.badge-warning{color:#92400E;background:#FFFBEB;border-color:#FDE68A}.foot{position:absolute;bottom:1.5mm;left:1mm;right:1mm;border-top:1px solid #E2E8F0;padding-top:5px;color:#94A3B8;font-size:6.8pt}.foot span:last-child{float:right}.page-title{display:table;width:100%;margin-bottom:9px}.page-title>svg,.page-title>div{display:table-cell;vertical-align:middle}.page-title>div{padding-left:8px}.market-kpis{border-spacing:5px;margin-bottom:9px}.market-kpi{padding:7px 9px}.market-kpi b{display:block;font-size:10.5pt;margin-top:2px}.market-kpi span{font-size:7.5pt}.chart-card{padding:9px 11px;margin-bottom:9px}.chart-head{display:table;width:100%;margin-bottom:5px}.chart-head>div,.chart-head>svg{display:table-cell;vertical-align:middle}.chart-head small{display:block;color:#64748B;font-size:7.6pt;margin-top:2px}.chart-head>svg{float:right}.chart-svg{width:100%;height:auto;display:block}.cols{border-spacing:5px}.cols>tbody>tr>td{width:50%;vertical-align:top}.content-card{padding:8px 9px;margin-bottom:7px;page-break-inside:auto}.detail-row{page-break-inside:avoid;margin-bottom:5px}.detail-full{page-break-inside:auto;margin-bottom:5px}.detail-full .content-card{page-break-inside:auto}.card-title{border-bottom:1px solid #F1F5F9;padding-bottom:5px;margin-bottom:4px;font-weight:700;font-size:9pt}.card-title span{margin-left:5px}.markdown{font-size:8.05pt;color:#334155}.markdown p{margin:3px 0 4px}.markdown ul,.markdown ol{margin:3px 0 5px 16px;padding:0}.markdown li{margin:1px 0}.markdown blockquote{margin:4px 0;padding:4px 6px;background:#F8FAFC;border-left:3px solid #93C5FD}.markdown table{width:100%;border-collapse:collapse;margin:5px 0;table-layout:fixed}.markdown th,.markdown td{border-bottom:1px solid #E2E8F0;padding:3px 4px;text-align:left;vertical-align:top;word-wrap:break-word}.markdown th{font-size:7pt;color:#64748B;background:#F8FAFC}.markdown h1,.markdown h2,.markdown h3,.markdown h4{font-size:8.8pt;margin:5px 0 3px}.hero{display:table;width:100%;margin-bottom:8px}.hero>div{display:table-cell;vertical-align:top}.ticker-big{font-size:23pt;font-weight:800}.name-big{color:#64748B;margin-top:1px}.hero-right{text-align:right}.price-big{font-size:17pt;font-weight:750}.hero-right>.badge{margin-left:5px}.stock-kpis{border-spacing:5px;margin-bottom:8px}.stock-kpis td{width:25%;background:white;border:1px solid #E2E8F0;border-radius:9px;padding:7px 8px}.stock-kpis b{display:block;margin-top:2px;font-size:9.2pt}
 '''
 
 
@@ -699,10 +926,21 @@ def main() -> None:
     market_md = market_file.read_text(encoding="utf-8") if market_file else ""
 
     stocks = parse_stocks(stock_md)
-    if not stocks:
-        stocks = _fallback_stocks_from_env()
+    if stock_file and stock_md.strip() and not stocks:
+        raise RuntimeError(
+            "Raportul de acțiuni există, dar parserul PDF nu a putut detecta secțiunile pe ticker. "
+            "Oprire intenționată: nu generăm pagini goale cu N/A."
+        )
 
-    print(f"[PDF] Instrumente detectate: {', '.join(s.ticker for s in stocks)}")
+    print(
+        f"[PDF] Instrumente detectate: {', '.join(s.ticker for s in stocks) if stocks else 'niciunul (market-only)'}"
+    )
+    for s in stocks:
+        print(
+            f"[PDF] {s.ticker}: score={s.score!r}, trend={s.trend!r}, signal={s.signal!r}, "
+            f"report_price={s.report_price!r}, report_change_pct={s.report_change_pct!r}, "
+            f"details_chars={len(s.details)}"
+        )
 
     stock_data = {stock.ticker: ohlc(stock.ticker) for stock in stocks}
     market_data = {ticker: ohlc(ticker) for ticker in ("^GSPC", "^IXIC", "^DJI", "^VIX")}
