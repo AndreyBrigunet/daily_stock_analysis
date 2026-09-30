@@ -289,10 +289,9 @@ class MarketAnalyzer:
         )
 
     def _get_review_language(self) -> str:
-        # Structural/template language. Korean reuses the English scaffolding;
-        # the Korean output directive is applied in the prompt builder.
+        # Korean and Romanian reuse the English structural templates.
         language = self._get_output_language()
-        return "en" if language == "ko" else language
+        return "en" if language in ("ko", "ro") else language
 
     def _get_template_review_language(self) -> str:
         return self._get_review_language()
@@ -342,6 +341,22 @@ class MarketAnalyzer:
         return "🟢" if change_pct > 0 else "🔴"
 
     def _get_review_title(self, date: str) -> str:
+        output_language = self._get_output_language()
+    
+        if output_language == "ro":
+            market_names = {
+                "us": "Recapitularea pieței SUA",
+                "hk": "Recapitularea pieței Hong Kong",
+                "jp": "Recapitularea pieței Japoniei",
+                "kr": "Recapitularea pieței Coreei",
+                "cn": "Recapitularea pieței din China",
+            }
+            market_name = market_names.get(
+                self.region,
+                "Recapitularea pieței",
+            )
+            return f"## {date} {market_name}"
+    
         if self._get_review_language() == "en":
             market_names = {
                 "us": "US Market Recap",
@@ -349,8 +364,12 @@ class MarketAnalyzer:
                 "jp": "Japan Market Recap",
                 "kr": "Korea Market Recap",
             }
-            market_name = market_names.get(self.region, "A-share Market Recap")
+            market_name = market_names.get(
+                self.region,
+                "A-share Market Recap",
+            )
             return f"## {date} {market_name}"
+    
         return f"## {date} 大盘复盘"
 
     def _get_index_hint(self) -> str:
@@ -1654,7 +1673,14 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         review_language = self._get_review_language()
         # Korean reuses the English structural template but the model is told to
         # write the entire shell, headings, guidance and conclusion in Korean.
-        shell_language_label = "Korean (한국어)" if self._get_output_language() == "ko" else "English"
+        output_language = self._get_output_language()
+
+        if output_language == "ko":
+            shell_language_label = "Korean (한국어)"
+        elif output_language == "ro":
+            shell_language_label = "Romanian (română)"
+        else:
+            shell_language_label = "English"
 
         # 指数行情信息（简洁格式，不用emoji）
         indices_text = ""
