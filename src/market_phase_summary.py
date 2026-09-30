@@ -51,6 +51,7 @@ _PUBLIC_SOURCE_LABELS_EN = {
 _MARKET_STATUS_PREFIX = {
     "zh": "市场状态",
     "en": "Market status",
+    "ro": "Stare piață",
 }
 _MARKET_LABELS_ZH = {
     "cn": "A股",
@@ -62,6 +63,12 @@ _MARKET_LABELS_EN = {
     "cn": "A-shares",
     "hk": "Hong Kong",
     "us": "US",
+    "tw": "Taiwan",
+}
+_MARKET_LABELS_RO = {
+    "cn": "China",
+    "hk": "Hong Kong",
+    "us": "SUA",
     "tw": "Taiwan",
 }
 _PHASE_LABELS_ZH = {
@@ -82,7 +89,15 @@ _PHASE_LABELS_EN = {
     "non_trading": "Non-trading",
     "unknown": "Unknown phase",
 }
-
+_PHASE_LABELS_RO = {
+    "premarket": "Pre-market",
+    "intraday": "Intraday",
+    "lunch_break": "Pauza de prânz",
+    "closing_auction": "Aproape de închidere",
+    "postmarket": "Post-market",
+    "non_trading": "Zi fără tranzacționare",
+    "unknown": "Fază necunoscută",
+}
 
 def render_market_phase_summary(phase_context: Any) -> Optional[Dict[str, Any]]:
     """Project a runtime MarketPhaseContext dict into a stable public summary."""
@@ -248,18 +263,41 @@ def format_public_market_status_line(
         return ""
 
     # Korean reuses the English structural summary; output language is set by directive.
-    lang = "en" if str(report_language or "").lower().startswith(("en", "ko")) else "zh"
-    phase_labels = _PHASE_LABELS_EN if lang == "en" else _PHASE_LABELS_ZH
-    market_labels = _MARKET_LABELS_EN if lang == "en" else _MARKET_LABELS_ZH
+    raw_language = str(report_language or "").lower()
+
+    if raw_language.startswith("ro"):
+        lang = "ro"
+    elif raw_language.startswith(("en", "ko")):
+        lang = "en"
+    else:
+        lang = "zh"
+
+    if lang == "ro":
+        phase_labels = _PHASE_LABELS_RO
+        market_labels = _MARKET_LABELS_RO
+    elif lang == "en":
+        phase_labels = _PHASE_LABELS_EN
+        market_labels = _MARKET_LABELS_EN
+    else:
+        phase_labels = _PHASE_LABELS_ZH
+        market_labels = _MARKET_LABELS_ZH
+
     phase_label = phase_labels.get(phase, phase)
+
     market = _safe_text(phase_summary.get("market"))
     market_key = market.lower()
+
     if market_key:
-        market_label = market_labels.get(market_key, market.upper() if lang == "en" else market)
+        market_label = market_labels.get(
+            market_key,
+            market.upper() if lang in {"en", "ro"} else market,
+        )
         value = f"{market_label} · {phase_label}"
     else:
         value = phase_label
-    separator = ": " if lang == "en" else "："
+
+    separator = "：" if lang == "zh" else ": "
+
     return f"{_MARKET_STATUS_PREFIX[lang]}{separator}{value}"
 
 
