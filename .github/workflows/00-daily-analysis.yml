@@ -83,6 +83,11 @@ jobs:
       - name: Efectuați analiza stocurilor
         env:
           # ==========================================
+          # Wealthfolio portfolio
+          # ==========================================
+          WEALTHFOLIO_URL: ${{ secrets.WEALTHFOLIO_URL }}
+          WEALTHFOLIO_TOKEN: ${{ secrets.WEALTHFOLIO_TOKEN }}
+          # ==========================================
           # AI 配置
           # ==========================================
           GENERATION_BACKEND: ${{ vars.GENERATION_BACKEND || secrets.GENERATION_BACKEND }}
@@ -549,10 +554,31 @@ jobs:
           # Analiza execuției
           if [ "$MODE" = "market-only" ]; then
             python main.py --market-review --no-notify $FORCE_RUN_ARG
-          elif [ "$MODE" = "stocks-only" ]; then
-            python main.py --no-market-review --no-notify $FORCE_RUN_ARG
           else
-            python main.py --no-notify $FORCE_RUN_ARG
+            if [ -z "${WEALTHFOLIO_URL:-}" ]; then
+              echo "❌ WEALTHFOLIO_URL nu este configurat."
+              exit 1
+            fi
+
+            if [ -z "${WEALTHFOLIO_TOKEN:-}" ]; then
+              echo "❌ WEALTHFOLIO_TOKEN nu este configurat."
+              exit 1
+            fi
+
+            echo "💼 Portfolio source: Wealthfolio"
+
+            if [ "$MODE" = "stocks-only" ]; then
+              python main.py \
+                --portfolio wealthfolio \
+                --no-market-review \
+                --no-notify \
+                $FORCE_RUN_ARG
+            else
+              python main.py \
+                --portfolio wealthfolio \
+                --no-notify \
+                $FORCE_RUN_ARG
+            fi
           fi
       
       - name: Încărcați raportul de analiză
