@@ -1,0 +1,195 @@
+name: Verificare Wealthfolio
+
+on:
+  workflow_dispatch:
+
+  # Rulează automat doar când modificăm integrarea Wealthfolio / portofoliu.
+  # Nu pornește analiza completă și nu apelează LLM-ul.
+  push:
+    paths:
+      - "main.py"
+      - "src/core/pipeline.py"
+      - "src/analyzer.py"
+      - "src/brokers/wealthfolio/portfolio.py"
+      - "scripts/generate_daily_pdf.py"
+      - ".github/workflows/01-portfolio-check.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wealthfolio-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Sintaxă + Wealthfolio
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Verifică sintaxa fișierelor modificate
+        run: |
+          set -euo pipefail
+
+          python -m py_compile \
+            main.py \
+            src/core/pipeline.py \
+            src/analyzer.py \
+            src/brokers/wealthfolio/portfolio.py \
+            scripts/generate_daily_pdf.py
+
+          echo "✅ Sintaxa Python este validă."
+
+      - name: Instalează doar dependența necesară testului
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check --quiet requests
+
+      - name: Verifică Wealthfolio și pozițiile
+        env:
+          WEALTHFOLIO_URL: ${{ secrets.WEALTHFOLIO_URL }}
+          WEALTHFOLIO_TOKEN: ${{ secrets.WEALTHFOLIO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${WEALTHFOLIO_URL:-}" ]; then
+            echo "❌ Lipsește secretul WEALTHFOLIO_URL."
+            exit 1
+          fi
+
+          if [ -z "${WEALTHFOLIO_TOKEN:-}" ]; then
+            echo "❌ Lipsește secretul WEALTHFOLIO_TOKEN."
+            exit 1
+          fi
+
+          mkdir -p reports
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from src.brokers.wealthfolio.portfolio import load_wealthfolio_holdings
+
+          holdings = load_wealthfolio_holdings(
+              save_snapshot=True,
+              snapshot_path="reports/portfolio_holdings.json",
+          )
+
+          if not holdings:
+              raise SystemExit("❌ Wealthfolio a răspuns, dar nu a returnat poziții active.")
+
+          required = (
+              "symbol",
+              "quantity",
+              "avg_cost_base",
+              "market_value_base",
+              "unrealized_gain_pct",
+              "weight",
+          )
+
+          errors = []
+          for item in holdings:
+              missing = [field for field in required if not hasattr(item, field)]
+              if missing:
+                  errors.append(f"{item.symbol}: lipsesc {', '.join(missing)}")
+
+          if errors:
+              raise SystemExit("❌ Structură Wealthfolio invalidă:\n" + "\n".join(errors))
+
+          snapshot = json.loads(
+              Path("reports/portfolio_holdings.json").read_text(encoding="utf-8")
+          )
+
+          snapshot_count = snapshot.get("holdings_count")
+          if snapshot_count != len(holdings):
+              raise SystemExit(
+                  f"❌ Snapshot inconsistent: holdings_count={snapshot_count}, "
+                  f"dar au fost încărcate {len(holdings)} poziții."
+              )
+
+          print("")
+          print("==========================================")
+          print(f"✅ Wealthfolio conectat: {len(holdings)} poziții")
+          print("✅ portfolio_holdings.json generat corect")
+          print("==========================================")
+          print("")
+
+          for item in holdings:
+              pnl = (
+                  f"{item.unrealized_gain_pct * 100:+.2f}%"
+                  if item.unrealized_gain_pct is not None
+                  else "N/A"
+              )
+              weight = (
+                  f"{item.weight * 100:.2f}%"
+                  if item.weight is not None
+                  else "N/A"
+              )
+              avg_cost = (
+                  f"{item.avg_cost_base:.2f}"
+                  if item.avg_cost_base is not None
+                  else "N/A"
+              )
+
+              print(
+                  f"{item.symbol:10} "
+                  f"qty={item.quantity:<10g} "
+                  f"avg_cost={avg_cost:<12} "
+                  f"pnl={pnl:<10} "
+                  f"weight={weight}"
+              )
+          PY
+
+      - name: Verifică snapshotul pentru PDF
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("reports/portfolio_holdings.json")
+          payload = json.loads(path.read_text(encoding="utf-8"))
+
+          holdings = payload.get("holdings")
+          if not isinstance(holdings, list) or not holdings:
+              raise SystemExit("❌ Snapshotul nu conține holdings.")
+
+          required_keys = {
+              "symbol",
+              "quantity",
+              "avg_cost_base",
+              "cost_basis_base",
+              "market_value_base",
+              "unrealized_gain_pct",
+              "weight",
+          }
+
+          for row in holdings:
+              missing = required_keys.difference(row)
+              if missing:
+                  raise SystemExit(
+                      f"❌ {row.get('symbol', '?')}: lipsesc câmpurile "
+                      + ", ".join(sorted(missing))
+                  )
+
+          print(f"✅ Snapshot compatibil cu PDF: {len(holdings)} poziții.")
+          PY
+
+      - name: Salvează snapshotul de test
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: wealthfolio-check-${{ github.run_number }}
+          path: reports/portfolio_holdings.json
+          if-no-files-found: ignore
+          retention-days: 3
