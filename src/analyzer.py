@@ -123,6 +123,127 @@ def _localized_text(language: Any, *, en: str, zh: str, ko: str, ro: Optional[st
 
     return zh
 
+def _format_portfolio_position_prompt(
+    portfolio_context: Any,
+    report_language: str,
+) -> str:
+    """Render the user's real broker position for personalized analysis."""
+    if not isinstance(portfolio_context, dict):
+        return ""
+
+    quantity = portfolio_context.get("quantity")
+
+    if quantity in (None, ""):
+        return ""
+
+    try:
+        quantity_value = float(quantity)
+    except (TypeError, ValueError):
+        return ""
+
+    if quantity_value == 0:
+        return ""
+
+    currency = str(portfolio_context.get("currency") or "").strip()
+
+    def money(value: Any) -> str:
+        if value in (None, ""):
+            return "N/A"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "N/A"
+        suffix = f" {currency}" if currency else ""
+        return f"{number:,.2f}{suffix}"
+
+    def percentage(value: Any) -> str:
+        if value in (None, ""):
+            return "N/A"
+        try:
+            return f"{float(value):+.2f}%"
+        except (TypeError, ValueError):
+            return "N/A"
+
+    quantity_text = f"{quantity_value:g}"
+    avg_cost = money(portfolio_context.get("avg_cost"))
+    total_cost = money(portfolio_context.get("total_cost"))
+    market_value = money(portfolio_context.get("market_value_base"))
+    pnl_base = money(portfolio_context.get("unrealized_pnl_base"))
+    pnl_pct = percentage(portfolio_context.get("unrealized_pnl_pct"))
+    weight_pct = percentage(portfolio_context.get("weight_pct"))
+    day_change_pct = percentage(portfolio_context.get("day_change_pct"))
+
+    language = normalize_report_language(report_language)
+
+    if language == "ro":
+        return f"""
+
+## Poziția reală a utilizatorului
+
+| Indicator | Valoare |
+|------|------|
+| Cantitate deținută | **{quantity_text}** |
+| Cost mediu | **{avg_cost}** |
+| Cost total | {total_cost} |
+| Valoare curentă | **{market_value}** |
+| P/L nerealizat | **{pnl_base} ({pnl_pct})** |
+| Pondere în portofoliu | {weight_pct} |
+| Variație zilnică a poziției | {day_change_pct} |
+
+> Acestea sunt datele reale ale poziției utilizatorului, nu un scenariu ipotetic.
+> Personalizează concluzia și planul de acțiune pentru această poziție.
+> Separă clar recomandarea pentru deținătorul actual de recomandarea pentru cineva fără poziție.
+> Ia în calcul costul mediu, profitul/pierderea nerealizată și ponderea în portofoliu.
+> Nu inventa valori lipsă.
+
+---
+"""
+
+    if language in ("en", "ko"):
+        return f"""
+
+## User's Actual Portfolio Position
+
+| Indicator | Value |
+|------|------|
+| Quantity Held | **{quantity_text}** |
+| Average Cost | **{avg_cost}** |
+| Total Cost | {total_cost} |
+| Current Market Value | **{market_value}** |
+| Unrealized P/L | **{pnl_base} ({pnl_pct})** |
+| Portfolio Weight | {weight_pct} |
+| Position Daily Change | {day_change_pct} |
+
+> This is the user's real portfolio position, not a hypothetical scenario.
+> Personalize the conclusion and action plan for the existing position.
+> Clearly distinguish the action for the current holder from a new investor.
+> Consider average cost, unrealized P/L and portfolio weight.
+> Never fabricate missing values.
+
+---
+"""
+
+    return f"""
+
+## 用户真实持仓
+
+| 指标 | 数值 |
+|------|------|
+| 持仓数量 | **{quantity_text}** |
+| 平均成本 | **{avg_cost}** |
+| 总成本 | {total_cost} |
+| 当前市值 | **{market_value}** |
+| 未实现盈亏 | **{pnl_base} ({pnl_pct})** |
+| 组合权重 | {weight_pct} |
+| 持仓日涨跌 | {day_change_pct} |
+
+> 以上为用户真实持仓，不是假设场景。
+> 必须结合成本、盈亏和组合权重给出当前持仓者的个性化操作建议。
+> 同时区分“已经持有”和“尚未持有”的操作方案。
+> 不得编造缺失数据。
+
+---
+"""
 
 def _normalize_risk_warning_values(value: Any) -> List[str]:
     """Normalize arbitrary risk_warning values into a flat list of text alerts."""
@@ -4443,6 +4564,13 @@ Output strictly in the following JSON format. This is a complete Decision Dashbo
 
 ---
 """
+        portfolio_section = _format_portfolio_position_prompt(
+            context.get("portfolio_context"),
+            report_language,
+        )
+        if portfolio_section:
+            prompt += portfolio_section
+
         prompt += format_market_phase_prompt_section(
             context.get("market_phase_context"),
             report_language=report_language,
