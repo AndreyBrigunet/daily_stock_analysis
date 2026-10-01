@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -75,7 +76,7 @@ def no_emoji(value: str) -> str:
 
 
 def normalize_report_text(value: str) -> str:
-    """Normalize raw report Markdown and Telegram-exported Markdown without losing data."""
+    """Normalize report Markdown without dropping user-visible analysis data."""
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
 
     # Telegram transcript exports may prefix each message with a timestamp/bot name.
@@ -88,15 +89,62 @@ def normalize_report_text(value: str) -> str:
 
     normalized_lines: list[str] = []
     for line in text.splitlines():
-        # Telegram transcript copied from chat often ends every visual line with "\\".
         if line.endswith("\\"):
             line = line[:-1]
         normalized_lines.append(line)
     text = "\n".join(normalized_lines)
 
-    # Undo one or more Telegram escape backslashes before Markdown punctuation.
+    # Undo Telegram escaping before Markdown punctuation.
     text = re.sub(r"\\+([()|>\[\]-])", r"\1", text)
 
+    # Drop control/format characters that wkhtmltopdf may render as boxes or stray glyphs.
+    text = "".join(
+        ch for ch in text
+        if ch in {"\n", "\t"} or unicodedata.category(ch) not in {"Cc", "Cf", "Cs"}
+    )
+    text = text.replace("\ufffe", "").replace("\uffff", "")
+    return text.strip()
+
+
+def _replace_financial_units(text: str) -> str:
+    """Convert source-specific Chinese unit suffixes into compact Romanian units."""
+    def billion_usd(match: re.Match[str]) -> str:
+        value = float(match.group(1)) / 10.0  # 1 亿 USD = 0.1 billion USD
+        return f"{value:.2f} mld. USD"
+
+    def million_shares(match: re.Match[str]) -> str:
+        value = float(match.group(1)) / 100.0  # 1 万 shares = 0.01 million shares
+        return f"{value:.2f} mil. acțiuni"
+
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*亿美元", billion_usd, text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*万股", million_shares, text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*美元", r"\1 USD", text)
+    return text
+
+
+def sanitize_markdown_for_pdf(value: str) -> str:
+    """Presentation-only cleanup; preserves report meaning and Markdown structure."""
+    text = normalize_report_text(value)
+    text = _replace_financial_units(text)
+
+    replacements = {
+        "For reference only, not investment advice.":
+            "Doar pentru informare; nu constituie recomandare de investiții.",
+        "quote: fallback": "cotație: sursă de rezervă",
+        "technical: partial": "tehnic: parțial",
+        "Quote: fallback": "Cotație: sursă de rezervă",
+        "Technical: partial": "Tehnic: parțial",
+        "None%": "N/A",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    # Section cards already have consistent SVG icons; remove inline emoji/pictographs
+    # to avoid broken glyphs in wkhtmltopdf.
+    text = no_emoji(text)
+    # Removing an emoji directly after ** can leave "** Label**", which some
+    # Markdown renderers treat as literal asterisks. Tighten strong openers again.
+    text = re.sub(r"\*\*\s+([^*\n])", r"**\1", text)
     return text.strip()
 
 
@@ -110,7 +158,7 @@ def strip_md(value: str) -> str:
 
 def md(value: str) -> str:
     return markdown2.markdown(
-        value or "",
+        sanitize_markdown_for_pdf(value),
         extras=["tables", "fenced-code-blocks", "strike"],
     )
 
@@ -215,6 +263,43 @@ def _extract_report_snapshot(details: str) -> tuple[float | None, float | None]:
             break
 
     return price, change_pct
+
+
+def _extract_snapshot_triplet(details: str) -> tuple[float | None, float | None, float | None]:
+    close_aliases = {"close", "închidere", "inchidere"}
+    prev_aliases = {"prev close", "previous close", "închiderea precedentă", "inchiderea precedenta"}
+    change_aliases = {"change %", "change%", "variație %", "variatie %", "schimbare %"}
+    close = prev_close = change_pct = None
+
+    for headers, values in _markdown_tables(details):
+        mapping = {
+            strip_md(h).lower().replace("\\", ""): values[i] if i < len(values) else ""
+            for i, h in enumerate(headers)
+        }
+        for key, value in mapping.items():
+            if close is None and key in close_aliases:
+                close = _parse_number(value)
+            if prev_close is None and key in prev_aliases:
+                prev_close = _parse_number(value)
+            if change_pct is None and key in change_aliases:
+                change_pct = _parse_number(value)
+        if close is not None and prev_close is not None and change_pct is not None:
+            break
+
+    return close, prev_close, change_pct
+
+
+def data_consistency_warning(stock: Stock) -> str | None:
+    close, prev_close, reported_pct = _extract_snapshot_triplet(stock.details)
+    if close is not None and prev_close not in (None, 0) and reported_pct is not None:
+        implied_pct = ((close / prev_close) - 1.0) * 100.0
+        if abs(implied_pct - reported_pct) >= 0.50:
+            return f"Date inconsistente: raport {reported_pct:+.2f}% vs. calcul {implied_pct:+.2f}%"
+
+    clean = strip_md(stock.details).lower()
+    if "intră în conflict" in clean or "intra in conflict" in clean or "datele zilnice privind variația prețului sunt neuniforme" in clean:
+        return "Date de variație neuniforme - verifică limitările raportului"
+    return None
 
 
 def _extract_stock_meta(details: str) -> tuple[int | None, str, str]:
@@ -670,6 +755,11 @@ def badge(text: str) -> str:
     return f'<span class="badge badge-{sigclass(value)}">{html.escape(value)}</span>'
 
 
+def _max_table_columns(body: str) -> int:
+    tables = _markdown_tables(body)
+    return max((len(headers) for headers, _ in tables), default=0)
+
+
 def section_card(title: str, body: str) -> str:
     t = title.lower()
     ico = (
@@ -680,8 +770,9 @@ def section_card(title: str, body: str) -> str:
         else "trend" if "concluz" in t or "perspect" in t or "trend" in t
         else "info"
     )
+    wide_class = " wide-table" if _max_table_columns(body) >= 5 else ""
     return (
-        '<div class="content-card">'
+        f'<div class="content-card{wide_class}">'
         f'<div class="card-title">{icon(ico, 17, BLUE)}<span>{html.escape(title)}</span></div>'
         f'<div class="markdown">{md(body)}</div>'
         '</div>'
@@ -689,28 +780,48 @@ def section_card(title: str, body: str) -> str:
 
 
 def detail_layout(sections: list[tuple[str, str]]) -> str:
-    """Render all sections without putting the whole report in one unbreakable table row.
-
-    Short cards are paired into two columns. Long/data-heavy cards are full width so
-    wkhtmltopdf can paginate them safely instead of clipping content.
-    """
+    """Render every section, preferring readable full-width data tables and safe page breaks."""
     chunks: list[str] = []
     pending: tuple[str, str] | None = None
 
+    force_full_titles = {
+        "situația pieței", "situatia pietei", "analiza datelor",
+        "decizie în funcție de faza pieței", "decizie in functie de faza pietei",
+        "plan de acțiune", "plan de actiune", "rezumat financiar",
+    }
+
+    def normalized_len(body: str) -> int:
+        return len(strip_md(body))
+
     def is_large(body: str) -> bool:
         normalized = normalize_report_text(body)
-        return len(normalized) > 1500 or normalized.count("\n|") >= 7 or normalized.count("\n-") >= 8
+        return normalized_len(body) > 3000 or normalized.count("\n|") >= 12 or normalized.count("\n-") >= 12
+
+    def wants_full(section: tuple[str, str]) -> bool:
+        title, body = section
+        return (
+            strip_md(title).lower() in force_full_titles
+            or _max_table_columns(body) >= 5
+            or is_large(body)
+        )
+
+    def keep_together(body: str) -> bool:
+        # These blocks comfortably fit on one A4 page in the report font size.
+        # Keeping them whole prevents orphan headings at the bottom of a page.
+        return normalized_len(body) <= 2800
 
     def flush_pending() -> None:
         nonlocal pending
         if pending is not None:
-            chunks.append(f'<div class="detail-full">{section_card(*pending)}</div>')
+            keep = " keep-together" if keep_together(pending[1]) else ""
+            chunks.append(f'<div class="detail-full{keep}">{section_card(*pending)}</div>')
             pending = None
 
     for section in sections:
-        if is_large(section[1]):
+        if wants_full(section):
             flush_pending()
-            chunks.append(f'<div class="detail-full">{section_card(*section)}</div>')
+            keep = " keep-together" if keep_together(section[1]) else ""
+            chunks.append(f'<div class="detail-full{keep}">{section_card(*section)}</div>')
             continue
 
         if pending is None:
@@ -732,7 +843,22 @@ def detail_layout(sections: list[tuple[str, str]]) -> str:
 
 def _first_meaningful_paragraph(markdown_text: str, limit: int = 640) -> str:
     sections = market_sections(markdown_text)
-    source = sections[0][1] if sections else markdown_text
+
+    preferred_body = ""
+    for title, body in sections:
+        key = strip_md(title).lower()
+        if "rezumatul pieței" in key or "rezumatul pietei" in key or key.startswith("1. rezumat"):
+            preferred_body = body
+            break
+
+    if not preferred_body:
+        for title, body in sections:
+            candidate = strip_md(body)
+            if len(candidate) >= 80:
+                preferred_body = body
+                break
+
+    source = preferred_body or (sections[0][1] if sections else markdown_text)
     text = strip_md(source)
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
@@ -748,11 +874,15 @@ def executive(stocks: list[Stock], market_md: str, stock_data: dict[str, pd.Data
     if len(stocks) > 5:
         ticker_line += f" · +{len(stocks)-5}"
 
+    count = len(stocks)
+    analyzed_label = "Analizat" if count == 1 else "Analizate"
+    analyzed_value = "1 instrument" if count == 1 else f"{count} instrumente"
+
     kpis = [
         ("chart", "Sentiment piață", sent),
         ("gauge", "Scor mediu", f"{avg}/100" if scores else "N/A"),
         ("shield", "Nivel risc", rk),
-        ("stack", "Analizate", f"{len(stocks)} instrumente"),
+        ("stack", analyzed_label, analyzed_value),
     ]
     kpi_html = "".join(
         f'<td><div class="kpi"><div class="kpi-icon">{icon(i, 19, BLUE)}</div>'
@@ -766,12 +896,17 @@ def executive(stocks: list[Stock], market_md: str, stock_data: dict[str, pd.Data
         df = stock_data.get(s.ticker, pd.DataFrame())
         px, change, cls = stock_price_snapshot(s, df)
         score_text = str(s.score) if s.score is not None else "N/A"
+        warning = data_consistency_warning(s)
+        warning_html = (
+            '<div class="data-warning compact">Date inconsistente</div>' if warning else ""
+        )
         cards.append(
             '<td><div class="stock-card">'
             '<div class="stock-top">'
             f'<div><b>{html.escape(s.ticker)}</b><small>{html.escape(s.name)}</small></div>{badge(s.signal)}'
             '</div>'
             f'<div class="price">{px}<span class="{cls}">{change}</span></div>'
+            f'{warning_html}'
             f'{candles(df.tail(44), 300, 92)}'
             '<div class="micro">'
             f'<span>Scor <b>{score_text}</b></span><span>Trend <b>{html.escape(s.trend)}</b></span>'
@@ -828,11 +963,16 @@ def stock_page(stock: Stock, df: pd.DataFrame) -> str:
     details_html = detail_layout(sections)
     score_text = f"{stock.score}/100" if stock.score is not None else "N/A"
     risk_text = risk(stock.details)
+    consistency = data_consistency_warning(stock)
+    consistency_html = (
+        f'<div class="data-warning">{icon("shield", 14, AMBER)}<span>{html.escape(consistency)}</span></div>'
+        if consistency else ""
+    )
 
     return f'''<section class="page break">
 <div class="hero">
   <div><div class="ticker-big">{html.escape(stock.ticker)}</div><div class="name-big">{html.escape(stock.name)}</div></div>
-  <div class="hero-right"><div class="price-big">{px}</div><span class="{cls}">{change}</span> {badge(stock.signal)}</div>
+  <div class="hero-right"><div class="price-big">{px}</div><span class="{cls}">{change}</span> {badge(stock.signal)}{consistency_html}</div>
 </div>
 <div class="chart-card"><div class="chart-head"><div><b>Grafic candlestick</b><small>3 luni · MA20</small></div>{icon('candles', 20, BLUE)}</div>{candles(df)}</div>
 <table class="stock-kpis"><tr>
@@ -852,7 +992,7 @@ CSS = r'''
 html,body{margin:0;padding:0}
 body{font-family:"DejaVu Sans","Noto Sans",Arial,sans-serif;background:#F8FAFC;color:#0F172A;font-size:10pt;line-height:1.45}
 .page{min-height:260mm;padding:2mm 1mm 7mm;position:relative;page-break-after:always}
-.page:last-child{page-break-after:auto}.break{}.icon{vertical-align:-3px}.eyebrow{font-size:8pt;letter-spacing:1.45px;color:#2563EB;font-weight:700;margin-bottom:4px}h1{font-size:25pt;margin:0;line-height:1.12}h2{font-size:18pt;margin:0}.top{display:table;width:100%;margin-bottom:12px}.top>div{display:table-cell;vertical-align:top}.top p{color:#64748B;margin:6px 0}.time{text-align:right;color:#64748B;font-size:8.4pt;white-space:nowrap}.kpi-row,.stocks-row,.stock-kpis,.market-kpis,.cols{width:100%;table-layout:fixed;border-collapse:separate}.kpi-row{border-spacing:5px;margin-bottom:12px}.kpi{background:white;border:1px solid #E2E8F0;border-radius:11px;padding:9px;min-height:66px}.kpi-icon{float:right}.kpi small,.stock-kpis small,.market-kpis small{display:block;color:#64748B;font-size:7.6pt}.kpi strong{display:block;font-size:14pt;margin-top:7px}.summary,.content-card,.chart-card,.stock-card,.market-kpi{background:white;border:1px solid #E2E8F0;border-radius:12px}.summary{padding:11px 13px;margin-bottom:13px}.summary p{color:#334155;margin:6px 0 0;font-size:9.2pt}.label{text-transform:uppercase;letter-spacing:1px;color:#64748B;font-size:7.8pt;font-weight:700;margin-bottom:6px}.stocks-row{border-spacing:5px}.stocks-row td{vertical-align:top}.stock-card{padding:9px;min-height:218px}.stock-top{display:table;width:100%}.stock-top>div{display:table-cell}.stock-top b{display:block;font-size:13.5pt}.stock-top small{display:block;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:128px}.stock-top .badge{float:right}.price{font-size:13pt;font-weight:700;margin:7px 0 3px}.price span{font-size:8.3pt;margin-left:5px}.positive{color:#16A34A}.negative{color:#DC2626}.neutral{color:#64748B}.micro{display:table;width:100%;background:#F8FAFC;border-radius:7px;padding:5px}.micro span{display:table-cell;width:50%;font-size:7.4pt;color:#64748B}.micro b{color:#0F172A}.badge{display:inline-block;border-radius:999px;padding:4px 7px;font-size:7.1pt;font-weight:700;border:1px solid}.badge-positive{color:#166534;background:#F0FDF4;border-color:#BBF7D0}.badge-negative{color:#991B1B;background:#FEF2F2;border-color:#FECACA}.badge-warning{color:#92400E;background:#FFFBEB;border-color:#FDE68A}.foot{position:absolute;bottom:1.5mm;left:1mm;right:1mm;border-top:1px solid #E2E8F0;padding-top:5px;color:#94A3B8;font-size:6.8pt}.foot span:last-child{float:right}.page-title{display:table;width:100%;margin-bottom:9px}.page-title>svg,.page-title>div{display:table-cell;vertical-align:middle}.page-title>div{padding-left:8px}.market-kpis{border-spacing:5px;margin-bottom:9px}.market-kpi{padding:7px 9px}.market-kpi b{display:block;font-size:10.5pt;margin-top:2px}.market-kpi span{font-size:7.5pt}.chart-card{padding:9px 11px;margin-bottom:9px}.chart-head{display:table;width:100%;margin-bottom:5px}.chart-head>div,.chart-head>svg{display:table-cell;vertical-align:middle}.chart-head small{display:block;color:#64748B;font-size:7.6pt;margin-top:2px}.chart-head>svg{float:right}.chart-svg{width:100%;height:auto;display:block}.cols{border-spacing:5px}.cols>tbody>tr>td{width:50%;vertical-align:top}.content-card{padding:8px 9px;margin-bottom:7px;page-break-inside:auto}.detail-row{page-break-inside:avoid;margin-bottom:5px}.detail-full{page-break-inside:auto;margin-bottom:5px}.detail-full .content-card{page-break-inside:auto}.card-title{border-bottom:1px solid #F1F5F9;padding-bottom:5px;margin-bottom:4px;font-weight:700;font-size:9pt}.card-title span{margin-left:5px}.markdown{font-size:8.05pt;color:#334155}.markdown p{margin:3px 0 4px}.markdown ul,.markdown ol{margin:3px 0 5px 16px;padding:0}.markdown li{margin:1px 0}.markdown blockquote{margin:4px 0;padding:4px 6px;background:#F8FAFC;border-left:3px solid #93C5FD}.markdown table{width:100%;border-collapse:collapse;margin:5px 0;table-layout:fixed}.markdown th,.markdown td{border-bottom:1px solid #E2E8F0;padding:3px 4px;text-align:left;vertical-align:top;word-wrap:break-word}.markdown th{font-size:7pt;color:#64748B;background:#F8FAFC}.markdown h1,.markdown h2,.markdown h3,.markdown h4{font-size:8.8pt;margin:5px 0 3px}.hero{display:table;width:100%;margin-bottom:8px}.hero>div{display:table-cell;vertical-align:top}.ticker-big{font-size:23pt;font-weight:800}.name-big{color:#64748B;margin-top:1px}.hero-right{text-align:right}.price-big{font-size:17pt;font-weight:750}.hero-right>.badge{margin-left:5px}.stock-kpis{border-spacing:5px;margin-bottom:8px}.stock-kpis td{width:25%;background:white;border:1px solid #E2E8F0;border-radius:9px;padding:7px 8px}.stock-kpis b{display:block;margin-top:2px;font-size:9.2pt}
+.page:last-child{page-break-after:auto}.break{}.icon{vertical-align:-3px}.eyebrow{font-size:8pt;letter-spacing:1.45px;color:#2563EB;font-weight:700;margin-bottom:4px}h1{font-size:25pt;margin:0;line-height:1.12}h2{font-size:18pt;margin:0}.top{display:table;width:100%;margin-bottom:12px}.top>div{display:table-cell;vertical-align:top}.top p{color:#64748B;margin:6px 0}.time{text-align:right;color:#64748B;font-size:8.4pt;white-space:nowrap}.kpi-row,.stocks-row,.stock-kpis,.market-kpis,.cols{width:100%;table-layout:fixed;border-collapse:separate}.kpi-row{border-spacing:5px;margin-bottom:12px}.kpi{background:white;border:1px solid #E2E8F0;border-radius:11px;padding:9px;min-height:66px}.kpi-icon{float:right}.kpi small,.stock-kpis small,.market-kpis small{display:block;color:#64748B;font-size:7.6pt}.kpi strong{display:block;font-size:14pt;margin-top:7px}.summary,.content-card,.chart-card,.stock-card,.market-kpi{background:white;border:1px solid #E2E8F0;border-radius:12px}.summary{padding:11px 13px;margin-bottom:13px}.summary p{color:#334155;margin:6px 0 0;font-size:9.2pt}.label{text-transform:uppercase;letter-spacing:1px;color:#64748B;font-size:7.8pt;font-weight:700;margin-bottom:6px}.stocks-row{border-spacing:5px}.stocks-row td{vertical-align:top}.stock-card{padding:9px;min-height:218px}.stock-top{display:table;width:100%}.stock-top>div{display:table-cell}.stock-top b{display:block;font-size:13.5pt}.stock-top small{display:block;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:128px}.stock-top .badge{float:right}.price{font-size:13pt;font-weight:700;margin:7px 0 3px}.price span{font-size:8.3pt;margin-left:5px}.positive{color:#16A34A}.negative{color:#DC2626}.neutral{color:#64748B}.micro{display:table;width:100%;background:#F8FAFC;border-radius:7px;padding:5px}.micro span{display:table-cell;width:50%;font-size:7.4pt;color:#64748B}.micro b{color:#0F172A}.badge{display:inline-block;border-radius:999px;padding:4px 7px;font-size:7.1pt;font-weight:700;border:1px solid}.badge-positive{color:#166534;background:#F0FDF4;border-color:#BBF7D0}.badge-negative{color:#991B1B;background:#FEF2F2;border-color:#FECACA}.badge-warning{color:#92400E;background:#FFFBEB;border-color:#FDE68A}.foot{position:absolute;bottom:1.5mm;left:1mm;right:1mm;border-top:1px solid #E2E8F0;padding-top:5px;color:#94A3B8;font-size:6.8pt}.foot span:last-child{float:right}.page-title{display:table;width:100%;margin-bottom:9px}.page-title>svg,.page-title>div{display:table-cell;vertical-align:middle}.page-title>div{padding-left:8px}.market-kpis{border-spacing:5px;margin-bottom:9px}.market-kpi{padding:7px 9px}.market-kpi b{display:block;font-size:10.5pt;margin-top:2px}.market-kpi span{font-size:7.5pt}.chart-card{padding:9px 11px;margin-bottom:9px}.chart-head{display:table;width:100%;margin-bottom:5px}.chart-head>div,.chart-head>svg{display:table-cell;vertical-align:middle}.chart-head small{display:block;color:#64748B;font-size:7.6pt;margin-top:2px}.chart-head>svg{float:right}.chart-svg{width:100%;height:auto;display:block}.cols{border-spacing:5px}.cols>tbody>tr>td{width:50%;vertical-align:top}.content-card{padding:8px 9px;margin-bottom:7px;page-break-inside:auto}.detail-row{page-break-inside:avoid;margin-bottom:5px}.detail-full{page-break-inside:auto;margin-bottom:5px}.detail-full .content-card{page-break-inside:auto}.keep-together,.keep-together .content-card{page-break-inside:avoid!important;break-inside:avoid-page!important}.wide-table .markdown table{table-layout:auto;font-size:7.55pt}.wide-table .markdown th,.wide-table .markdown td{padding:4px 5px;word-break:normal}.data-warning{display:inline-table;margin-top:5px;padding:4px 7px;border:1px solid #FDE68A;background:#FFFBEB;color:#92400E;border-radius:8px;font-size:7.2pt;font-weight:700;max-width:255px;text-align:left}.data-warning svg,.data-warning span{display:table-cell;vertical-align:middle}.data-warning span{padding-left:4px}.data-warning.compact{display:inline-block;width:auto;margin:3px 0 1px;padding:2px 5px;font-size:6.5pt}.card-title{border-bottom:1px solid #F1F5F9;padding-bottom:5px;margin-bottom:4px;font-weight:700;font-size:9pt}.card-title span{margin-left:5px}.markdown{font-size:8.05pt;color:#334155}.markdown p{margin:3px 0 4px}.markdown ul,.markdown ol{margin:3px 0 5px 16px;padding:0}.markdown li{margin:1px 0}.markdown blockquote{margin:4px 0;padding:4px 6px;background:#F8FAFC;border-left:3px solid #93C5FD}.markdown table{width:100%;border-collapse:collapse;margin:5px 0;table-layout:fixed}.markdown th,.markdown td{border-bottom:1px solid #E2E8F0;padding:3px 4px;text-align:left;vertical-align:top;word-wrap:break-word}.markdown th{font-size:7pt;color:#64748B;background:#F8FAFC}.markdown h1,.markdown h2,.markdown h3,.markdown h4{font-size:8.8pt;margin:5px 0 3px}.hero{display:table;width:100%;margin-bottom:8px}.hero>div{display:table-cell;vertical-align:top}.ticker-big{font-size:23pt;font-weight:800}.name-big{color:#64748B;margin-top:1px}.hero-right{text-align:right}.price-big{font-size:17pt;font-weight:750}.hero-right>.badge{margin-left:5px}.stock-kpis{border-spacing:5px;margin-bottom:8px}.stock-kpis td{width:25%;background:white;border:1px solid #E2E8F0;border-radius:9px;padding:7px 8px}.stock-kpis b{display:block;margin-top:2px;font-size:9.2pt}
 '''
 
 
