@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import argparse
 import html
 import os
@@ -50,6 +51,91 @@ class Stock:
     report_price: float | None = None
     report_change_pct: float | None = None
 
+@dataclass
+class PortfolioPosition:
+    symbol: str
+    quantity: float
+    currency: str = "USD"
+    avg_cost: float | None = None
+    cost_basis: float | None = None
+    market_value: float | None = None
+    unrealized_pnl: float | None = None
+    unrealized_pnl_pct: float | None = None
+    weight_pct: float | None = None
+
+
+def load_portfolio_positions(folder: Path) -> dict[str, PortfolioPosition]:
+    path = folder / "portfolio_holdings.json"
+
+    if not path.is_file():
+        return {}
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[PDF] Nu pot citi {path}: {exc}")
+        return {}
+
+    base_currency = str(payload.get("currency") or "USD")
+    positions: dict[str, PortfolioPosition] = {}
+
+    for item in payload.get("holdings") or []:
+        if not isinstance(item, dict):
+            continue
+
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+
+        try:
+            quantity = float(item.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+
+        if quantity == 0:
+            continue
+
+        def number(key: str) -> float | None:
+            value = item.get(key)
+            if value in (None, ""):
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        cost_basis = number("cost_basis_base")
+        market_value = number("market_value_base")
+
+        unrealized_pnl = None
+        if cost_basis is not None and market_value is not None:
+            unrealized_pnl = market_value - cost_basis
+
+        raw_pnl_pct = number("unrealized_gain_pct")
+        raw_weight = number("weight")
+
+        positions[symbol] = PortfolioPosition(
+            symbol=symbol,
+            quantity=quantity,
+            currency=base_currency,
+            avg_cost=number("avg_cost_base"),
+            cost_basis=cost_basis,
+            market_value=market_value,
+            unrealized_pnl=unrealized_pnl,
+            unrealized_pnl_pct=(
+                raw_pnl_pct * 100.0
+                if raw_pnl_pct is not None
+                else None
+            ),
+            weight_pct=(
+                raw_weight * 100.0
+                if raw_weight is not None
+                else None
+            ),
+        )
+
+    print(f"[PDF] Poziții Wealthfolio încărcate: {len(positions)}")
+    return positions
 
 def newest_file(files: Iterable[Path]) -> Path | None:
     items = [p for p in files if p.is_file()]
@@ -956,8 +1042,84 @@ def market_page(text: str, market_data: dict[str, pd.DataFrame]) -> str:
 <div class="foot"><span>Market overview</span><span>Nu constituie recomandare de investiții.</span></div>
 </section>'''
 
+def _money(value: float | None, currency: str) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:,.2f} {currency}"
 
-def stock_page(stock: Stock, df: pd.DataFrame) -> str:
+
+def portfolio_position_card(position: PortfolioPosition | None) -> str:
+    if position is None:
+        return ""
+
+    quantity = f"{position.quantity:g}"
+
+    pnl_pct = (
+        f"{position.unrealized_pnl_pct:+.2f}%"
+        if position.unrealized_pnl_pct is not None
+        else "N/A"
+    )
+
+    weight = (
+        f"{position.weight_pct:.2f}%"
+        if position.weight_pct is not None
+        else "N/A"
+    )
+
+    pnl_class = "neutral"
+    if position.unrealized_pnl is not None:
+        if position.unrealized_pnl > 0:
+            pnl_class = "positive"
+        elif position.unrealized_pnl < 0:
+            pnl_class = "negative"
+
+    pnl_value = _money(position.unrealized_pnl, position.currency)
+
+    return f'''
+<div class="position-panel">
+  <div class="position-title">
+    {icon("stack", 17, BLUE)}
+    <span>Poziția ta</span>
+  </div>
+
+  <table class="position-grid">
+    <tr>
+      <td>
+        <small>Deținere</small>
+        <b>{html.escape(quantity)}</b>
+        <span>acțiuni</span>
+      </td>
+
+      <td>
+        <small>Cost mediu</small>
+        <b>{html.escape(_money(position.avg_cost, position.currency))}</b>
+      </td>
+
+      <td>
+        <small>Valoare poziție</small>
+        <b>{html.escape(_money(position.market_value, position.currency))}</b>
+      </td>
+
+      <td>
+        <small>P/L nerealizat</small>
+        <b class="{pnl_class}">{html.escape(pnl_pct)}</b>
+        <span class="{pnl_class}">{html.escape(pnl_value)}</span>
+      </td>
+
+      <td>
+        <small>Pondere portofoliu</small>
+        <b>{html.escape(weight)}</b>
+      </td>
+    </tr>
+  </table>
+</div>
+'''
+
+def stock_page(
+    stock: Stock,
+    df: pd.DataFrame,
+    position: PortfolioPosition | None = None,
+) -> str:
     px, change, cls = stock_price_snapshot(stock, df)
     sections = stock_sections(stock.details)
     details_html = detail_layout(sections)
@@ -968,6 +1130,7 @@ def stock_page(stock: Stock, df: pd.DataFrame) -> str:
         f'<div class="data-warning">{icon("shield", 14, AMBER)}<span>{html.escape(consistency)}</span></div>'
         if consistency else ""
     )
+    position_html = portfolio_position_card(position)
 
     return f'''<section class="page break">
 <div class="hero">
@@ -981,6 +1144,9 @@ def stock_page(stock: Stock, df: pd.DataFrame) -> str:
 <td><small>Semnal</small><b>{html.escape(stock.signal)}</b></td>
 <td><small>Risc</small><b>{html.escape(risk_text)}</b></td>
 </tr></table>
+
+{position_html}
+
 {details_html}
 <div class="foot"><span>{html.escape(stock.ticker)} · raport detaliat</span><span>Nu constituie recomandare de investiții.</span></div>
 </section>'''
@@ -993,6 +1159,54 @@ html,body{margin:0;padding:0}
 body{font-family:"DejaVu Sans","Noto Sans",Arial,sans-serif;background:#F8FAFC;color:#0F172A;font-size:10pt;line-height:1.45}
 .page{min-height:260mm;padding:2mm 1mm 7mm;position:relative;page-break-after:always}
 .page:last-child{page-break-after:auto}.break{}.icon{vertical-align:-3px}.eyebrow{font-size:8pt;letter-spacing:1.45px;color:#2563EB;font-weight:700;margin-bottom:4px}h1{font-size:25pt;margin:0;line-height:1.12}h2{font-size:18pt;margin:0}.top{display:table;width:100%;margin-bottom:12px}.top>div{display:table-cell;vertical-align:top}.top p{color:#64748B;margin:6px 0}.time{text-align:right;color:#64748B;font-size:8.4pt;white-space:nowrap}.kpi-row,.stocks-row,.stock-kpis,.market-kpis,.cols{width:100%;table-layout:fixed;border-collapse:separate}.kpi-row{border-spacing:5px;margin-bottom:12px}.kpi{background:white;border:1px solid #E2E8F0;border-radius:11px;padding:9px;min-height:66px}.kpi-icon{float:right}.kpi small,.stock-kpis small,.market-kpis small{display:block;color:#64748B;font-size:7.6pt}.kpi strong{display:block;font-size:14pt;margin-top:7px}.summary,.content-card,.chart-card,.stock-card,.market-kpi{background:white;border:1px solid #E2E8F0;border-radius:12px}.summary{padding:11px 13px;margin-bottom:13px}.summary p{color:#334155;margin:6px 0 0;font-size:9.2pt}.label{text-transform:uppercase;letter-spacing:1px;color:#64748B;font-size:7.8pt;font-weight:700;margin-bottom:6px}.stocks-row{border-spacing:5px}.stocks-row td{vertical-align:top}.stock-card{padding:9px;min-height:218px}.stock-top{display:table;width:100%}.stock-top>div{display:table-cell}.stock-top b{display:block;font-size:13.5pt}.stock-top small{display:block;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:128px}.stock-top .badge{float:right}.price{font-size:13pt;font-weight:700;margin:7px 0 3px}.price span{font-size:8.3pt;margin-left:5px}.positive{color:#16A34A}.negative{color:#DC2626}.neutral{color:#64748B}.micro{display:table;width:100%;background:#F8FAFC;border-radius:7px;padding:5px}.micro span{display:table-cell;width:50%;font-size:7.4pt;color:#64748B}.micro b{color:#0F172A}.badge{display:inline-block;border-radius:999px;padding:4px 7px;font-size:7.1pt;font-weight:700;border:1px solid}.badge-positive{color:#166534;background:#F0FDF4;border-color:#BBF7D0}.badge-negative{color:#991B1B;background:#FEF2F2;border-color:#FECACA}.badge-warning{color:#92400E;background:#FFFBEB;border-color:#FDE68A}.foot{position:absolute;bottom:1.5mm;left:1mm;right:1mm;border-top:1px solid #E2E8F0;padding-top:5px;color:#94A3B8;font-size:6.8pt}.foot span:last-child{float:right}.page-title{display:table;width:100%;margin-bottom:9px}.page-title>svg,.page-title>div{display:table-cell;vertical-align:middle}.page-title>div{padding-left:8px}.market-kpis{border-spacing:5px;margin-bottom:9px}.market-kpi{padding:7px 9px}.market-kpi b{display:block;font-size:10.5pt;margin-top:2px}.market-kpi span{font-size:7.5pt}.chart-card{padding:9px 11px;margin-bottom:9px}.chart-head{display:table;width:100%;margin-bottom:5px}.chart-head>div,.chart-head>svg{display:table-cell;vertical-align:middle}.chart-head small{display:block;color:#64748B;font-size:7.6pt;margin-top:2px}.chart-head>svg{float:right}.chart-svg{width:100%;height:auto;display:block}.cols{border-spacing:5px}.cols>tbody>tr>td{width:50%;vertical-align:top}.content-card{padding:8px 9px;margin-bottom:7px;page-break-inside:auto}.detail-row{page-break-inside:avoid;margin-bottom:5px}.detail-full{page-break-inside:auto;margin-bottom:5px}.detail-full .content-card{page-break-inside:auto}.keep-together,.keep-together .content-card{page-break-inside:avoid!important;break-inside:avoid-page!important}.wide-table .markdown table{table-layout:auto;font-size:7.55pt}.wide-table .markdown th,.wide-table .markdown td{padding:4px 5px;word-break:normal}.data-warning{display:inline-table;margin-top:5px;padding:4px 7px;border:1px solid #FDE68A;background:#FFFBEB;color:#92400E;border-radius:8px;font-size:7.2pt;font-weight:700;max-width:255px;text-align:left}.data-warning svg,.data-warning span{display:table-cell;vertical-align:middle}.data-warning span{padding-left:4px}.data-warning.compact{display:inline-block;width:auto;margin:3px 0 1px;padding:2px 5px;font-size:6.5pt}.card-title{border-bottom:1px solid #F1F5F9;padding-bottom:5px;margin-bottom:4px;font-weight:700;font-size:9pt}.card-title span{margin-left:5px}.markdown{font-size:8.05pt;color:#334155}.markdown p{margin:3px 0 4px}.markdown ul,.markdown ol{margin:3px 0 5px 16px;padding:0}.markdown li{margin:1px 0}.markdown blockquote{margin:4px 0;padding:4px 6px;background:#F8FAFC;border-left:3px solid #93C5FD}.markdown table{width:100%;border-collapse:collapse;margin:5px 0;table-layout:fixed}.markdown th,.markdown td{border-bottom:1px solid #E2E8F0;padding:3px 4px;text-align:left;vertical-align:top;word-wrap:break-word}.markdown th{font-size:7pt;color:#64748B;background:#F8FAFC}.markdown h1,.markdown h2,.markdown h3,.markdown h4{font-size:8.8pt;margin:5px 0 3px}.hero{display:table;width:100%;margin-bottom:8px}.hero>div{display:table-cell;vertical-align:top}.ticker-big{font-size:23pt;font-weight:800}.name-big{color:#64748B;margin-top:1px}.hero-right{text-align:right}.price-big{font-size:17pt;font-weight:750}.hero-right>.badge{margin-left:5px}.stock-kpis{border-spacing:5px;margin-bottom:8px}.stock-kpis td{width:25%;background:white;border:1px solid #E2E8F0;border-radius:9px;padding:7px 8px}.stock-kpis b{display:block;margin-top:2px;font-size:9.2pt}
+
+.position-panel{
+    background:white;
+    border:1px solid #DBEAFE;
+    border-radius:11px;
+    padding:7px 9px;
+    margin-bottom:8px;
+    page-break-inside:avoid
+}
+.position-title{
+    font-size:8.6pt;
+    font-weight:700;
+    color:#1D4ED8;
+    margin-bottom:5px
+}
+.position-title svg{
+    vertical-align:-4px;
+    margin-right:5px
+}
+.position-grid{
+    width:100%;
+    table-layout:fixed;
+    border-collapse:collapse
+}
+.position-grid td{
+    width:20%;
+    padding:3px 7px;
+    border-right:1px solid #E2E8F0;
+    vertical-align:top
+}
+.position-grid td:last-child{
+    border-right:none
+}
+.position-grid small{
+    display:block;
+    color:#64748B;
+    font-size:6.8pt;
+    margin-bottom:2px
+}
+.position-grid b{
+    display:block;
+    font-size:8.7pt
+}
+.position-grid span{
+    display:block;
+    font-size:6.7pt;
+    color:#64748B
+}
 '''
 
 
@@ -1002,12 +1216,20 @@ def build_html(
     stocks: list[Stock],
     stock_data: dict[str, pd.DataFrame],
     market_data: dict[str, pd.DataFrame],
+    portfolio_positions: dict[str, PortfolioPosition],
 ) -> str:
     now = datetime.now(TZ)
     pages = [executive(stocks, market_md, stock_data, now)]
     if market_md.strip():
         pages.append(market_page(market_md, market_data))
-    pages.extend(stock_page(stock, stock_data.get(stock.ticker, pd.DataFrame())) for stock in stocks)
+    pages.extend(
+        stock_page(
+            stock,
+            stock_data.get(stock.ticker, pd.DataFrame()),
+            portfolio_positions.get(stock.ticker.upper()),
+        )
+        for stock in stocks
+    )
 
     return Template(
         '<!doctype html><html lang="ro"><head><meta charset="utf-8">'
@@ -1057,6 +1279,7 @@ def main() -> None:
 
     folder = Path(args.reports_dir)
     folder.mkdir(parents=True, exist_ok=True)
+    portfolio_positions = load_portfolio_positions(folder)
     stock_file, market_file = reports_in(folder)
 
     if not stock_file and not market_file:
@@ -1085,7 +1308,7 @@ def main() -> None:
     stock_data = {stock.ticker: ohlc(stock.ticker) for stock in stocks}
     market_data = {ticker: ohlc(ticker) for ticker in ("^GSPC", "^IXIC", "^DJI", "^VIX")}
 
-    html_text = build_html(stock_md, market_md, stocks, stock_data, market_data)
+    html_text = build_html(stock_md, market_md, stocks, stock_data, market_data, portfolio_positions,)
 
     if args.html_output:
         html_debug = Path(args.html_output)
