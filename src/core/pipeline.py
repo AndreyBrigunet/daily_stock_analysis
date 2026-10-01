@@ -462,9 +462,7 @@ class StockAnalysisPipeline:
         """
         stock_name = code
         try:
-            portfolio_context = getattr(self, "portfolio_context", None)
-            if not isinstance(portfolio_context, dict):
-                portfolio_context = None
+            portfolio_context = self._portfolio_context_for_code(code)
             is_index = (
                 analysis_target is not None
                 and analysis_target.asset_type == ParseStatus.INDEX
@@ -998,7 +996,56 @@ class StockAnalysisPipeline:
             logger.error(f"{stock_name}({code}) 分析失败: {e}")
             logger.exception(f"{stock_name}({code}) 详细错误信息:")
             return None
-    
+
+    def _portfolio_context_for_code(
+        self,
+        code: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the real portfolio position for the stock currently analyzed."""
+        context = getattr(self, "portfolio_context", None)
+
+        if not isinstance(context, dict):
+            return None
+
+        positions = context.get("positions")
+
+        # Preserve compatibility with callers that already pass one direct position.
+        if not isinstance(positions, dict):
+            return dict(context)
+
+        raw_code = str(code or "").strip()
+        normalized_code = normalize_stock_code(raw_code) if raw_code else ""
+
+        candidates = [
+            raw_code,
+            raw_code.upper(),
+            normalized_code,
+            normalized_code.upper(),
+        ]
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+
+            position = positions.get(candidate)
+            if isinstance(position, dict):
+                resolved = dict(position)
+                resolved.setdefault("source", context.get("source"))
+                return resolved
+
+        # Case-insensitive fallback.
+        wanted = {candidate.upper() for candidate in candidates if candidate}
+
+        for symbol, position in positions.items():
+            if str(symbol).strip().upper() not in wanted:
+                continue
+            if isinstance(position, dict):
+                resolved = dict(position)
+                resolved.setdefault("source", context.get("source"))
+                return resolved
+
+        return None
+
     def _enhance_context(
         self,
         context: Dict[str, Any],
