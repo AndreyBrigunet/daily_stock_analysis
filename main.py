@@ -610,15 +610,86 @@ def _resolve_portfolio_stock_codes(args: argparse.Namespace) -> Optional[List[st
     if not portfolio:
         return None
 
+    # Prevent stale context when the same args object is reused by the scheduler.
+    setattr(args, "_portfolio_context", None)
+
     if portfolio == "futu":
         from src.brokers.futu.portfolio import load_futu_stock_codes
 
         raw_codes = load_futu_stock_codes()
 
     elif portfolio == "wealthfolio":
-        from src.brokers.wealthfolio.portfolio import load_wealthfolio_stock_codes
+        from src.brokers.wealthfolio.portfolio import load_wealthfolio_holdings
 
-        raw_codes = load_wealthfolio_stock_codes()
+        holdings = load_wealthfolio_holdings()
+
+        raw_codes: List[str] = []
+        positions: Dict[str, Dict[str, Any]] = {}
+
+        for holding in holdings:
+            raw_symbol = str(holding.symbol or "").strip()
+            if not raw_symbol:
+                continue
+
+            symbol = canonical_stock_code(raw_symbol)
+            raw_codes.append(raw_symbol)
+
+            market_value = holding.market_value_base
+            total_cost = holding.cost_basis_base
+
+            unrealized_pnl_base = None
+            if market_value is not None and total_cost is not None:
+                unrealized_pnl_base = market_value - total_cost
+
+            positions[symbol] = {
+                "source": "wealthfolio",
+                "account_name": holding.account,
+                "symbol": symbol,
+                "currency": holding.currency,
+                "quantity": holding.quantity,
+                "avg_cost": holding.avg_cost_base,
+                "total_cost": total_cost,
+                "market_value_base": market_value,
+                "unrealized_pnl_base": unrealized_pnl_base,
+
+                # Wealthfolio returns these as ratios:
+                # 0.25 = 25%, while daily_stock_analysis expects percentage points.
+                "unrealized_pnl_pct": (
+                    holding.unrealized_gain_pct * 100.0
+                    if holding.unrealized_gain_pct is not None
+                    else None
+                ),
+                "total_gain_base": holding.total_gain_base,
+                "total_gain_pct": (
+                    holding.total_gain_pct * 100.0
+                    if holding.total_gain_pct is not None
+                    else None
+                ),
+                "day_change_pct": (
+                    holding.day_change_pct * 100.0
+                    if holding.day_change_pct is not None
+                    else None
+                ),
+                "weight_pct": (
+                    holding.weight * 100.0
+                    if holding.weight is not None
+                    else None
+                ),
+
+                "price_source": "wealthfolio",
+                "price_provider": "wealthfolio",
+                "price_available": market_value is not None,
+                "cost_method": "broker",
+            }
+
+        setattr(
+            args,
+            "_portfolio_context",
+            {
+                "source": "wealthfolio",
+                "positions": positions,
+            },
+        )
 
     else:
         raise ValueError(f"Portfolio nesuportat: {portfolio}")
@@ -629,7 +700,6 @@ def _resolve_portfolio_stock_codes(args: argparse.Namespace) -> Optional[List[st
         if (code or "").strip()
     ]
 
-    # Păstrează ordinea și elimină duplicatele.
     stock_codes = list(dict.fromkeys(stock_codes))
 
     logger.info(
@@ -969,6 +1039,7 @@ def run_full_analysis(
             query_id=query_id,
             query_source="cli",
             save_context_snapshot=save_context_snapshot,
+            portfolio_context=getattr(args, "_portfolio_context", None),
             daily_market_context_enabled=should_use_daily_market_context,
             daily_market_context_allow_generate=should_use_daily_market_context,
         )
