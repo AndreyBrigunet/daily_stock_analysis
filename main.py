@@ -84,6 +84,7 @@ from src.webui_frontend import prepare_webui_frontend_assets
 from src.config import get_config, Config
 from src.logging_config import setup_logging
 from src.brokers.futu.portfolio import FutuPortfolioError
+from src.brokers.wealthfolio.portfolio import WealthfolioPortfolioError
 from data_provider.base import canonical_stock_code
 from src.services.stock_list_parser import (
     AnalysisTarget,
@@ -297,7 +298,8 @@ def parse_arguments() -> argparse.Namespace:
   python main.py --dry-run          # 仅获取数据，不进行 AI 分析
   python main.py --stocks 600519,000001  # 指定分析特定股票
   python main.py --stocks sh000016,000300.CSI,930955.CSI  # 指定分析已登记指数（sh/sz 前缀或 .CSI alias）
-  python main.py --portfolio futu   # 使用 Futu 真实正股持仓（覆盖 --stocks）
+  python main.py --portfolio futu         # Futu portfolio
+  python main.py --portfolio wealthfolio  # Wealthfolio portfolio
   python main.py --no-notify        # 不发送推送通知
   python main.py --check-notify     # 检查通知配置，不发送通知
   python main.py --single-notify    # 启用单股推送模式（每分析完一只立即推送）
@@ -327,8 +329,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         '--portfolio',
         type=str.lower,
-        choices=('futu',),
-        help='使用券商真实持仓作为股票列表；当前支持 futu，并覆盖 --stocks/STOCK_LIST'
+        choices=('futu', 'wealthfolio'),
+        help='Folosește portofoliul real ca listă de instrumente; suportă futu și wealthfolio și suprascrie --stocks/STOCK_LIST'
     )
 
     parser.add_argument(
@@ -602,21 +604,40 @@ def _refresh_stock_index_cache_for_analysis(config: Config) -> None:
 
 
 def _resolve_portfolio_stock_codes(args: argparse.Namespace) -> Optional[List[str]]:
-    """Resolve an optional broker portfolio into the analysis stock list."""
+    """Resolve an optional live portfolio into the analysis stock list."""
     portfolio = str(getattr(args, "portfolio", "") or "").strip().lower()
+
     if not portfolio:
         return None
-    if portfolio != "futu":  # argparse prevents this for CLI callers; keep API callers safe.
-        raise ValueError(f"不支持的 portfolio: {portfolio}")
 
-    from src.brokers.futu.portfolio import load_futu_stock_codes
+    if portfolio == "futu":
+        from src.brokers.futu.portfolio import load_futu_stock_codes
+
+        raw_codes = load_futu_stock_codes()
+
+    elif portfolio == "wealthfolio":
+        from src.brokers.wealthfolio.portfolio import load_wealthfolio_stock_codes
+
+        raw_codes = load_wealthfolio_stock_codes()
+
+    else:
+        raise ValueError(f"Portfolio nesuportat: {portfolio}")
 
     stock_codes = [
         canonical_stock_code(code)
-        for code in load_futu_stock_codes()
+        for code in raw_codes
         if (code or "").strip()
     ]
-    logger.info("portfolio=futu 已覆盖 stocks/STOCK_LIST，使用 %d 只真实正股", len(stock_codes))
+
+    # Păstrează ordinea și elimină duplicatele.
+    stock_codes = list(dict.fromkeys(stock_codes))
+
+    logger.info(
+        "portfolio=%s a suprascris --stocks/STOCK_LIST: %d instrumente",
+        portfolio,
+        len(stock_codes),
+    )
+
     return stock_codes
 
 
@@ -885,7 +906,7 @@ def run_full_analysis(
                         break
             analysis_targets = filtered_targets
         stock_codes = filtered_codes
-        skip_futu_stock_analysis = (
+        skip_portfolio_stock_analysis = (
             portfolio_stock_codes is not None and not stock_codes
         )
 
@@ -978,11 +999,20 @@ def run_full_analysis(
             )
 
         # 1. 运行个股分析
-        if skip_futu_stock_analysis:
+        if skip_portfolio_stock_analysis:
+            portfolio_name = str(getattr(args, "portfolio", "") or "portfolio")
+        
             if portfolio_is_empty:
-                logger.info("真实账户中无符合条件的 Futu 持仓，跳过个股分析。")
+                logger.info(
+                    "%s nu conține poziții eligibile pentru analiză.",
+                    portfolio_name,
+                )
             else:
-                logger.info("Futu 持仓经交易日过滤后无可分析股票，跳过个股分析。")
+                logger.info(
+                    "Pozițiile din %s au fost eliminate de filtrul zilelor de tranzacționare.",
+                    portfolio_name,
+                )
+        
             results = []
         else:
             results = pipeline.run(
@@ -1110,7 +1140,7 @@ def run_full_analysis(
         expected_stock_report = (
             not getattr(args, "dry_run", False)
             and bool(stock_codes)
-            and not skip_futu_stock_analysis
+            and not skip_portfolio_stock_analysis
         )
         deferred_failure_result = None
         if expected_stock_report and results and not getattr(
@@ -1845,11 +1875,11 @@ def main() -> int:
                 analysis_ok = _run_analysis_with_runtime_scheduler_lock(
                     config, args, stock_codes, analysis_targets
                 )
-            except FutuPortfolioError as exc:
+            except (FutuPortfolioError, WealthfolioPortfolioError) as exc:
                 if not start_serve:
                     raise
                 logger.exception(
-                    "Futu 持仓导入失败，Web/API 服务继续运行: %s",
+                    "Importul portofoliului a eșuat; Web/API continuă să ruleze: %s",
                     exc,
                 )
             else:
