@@ -18,6 +18,7 @@ on:
           - full          # 完整分析（股票+大盘）
           - market-only   # 仅大盘复盘
           - stocks-only   # 仅股票分析
+          - portfolio-test
       force_run:
         description: 'Force run (omisiunea verificărilor din ziua de tranzacționare) '
         required: false
@@ -552,8 +553,45 @@ jobs:
           fi
 
           # Analiza execuției
-          if [ "$MODE" = "market-only" ]; then
+          if [ "$MODE" = "portfolio-test" ]; then
+            if [ -z "${WEALTHFOLIO_URL:-}" ]; then
+              echo "❌ WEALTHFOLIO_URL nu este configurat."
+              exit 1
+            fi
+
+            if [ -z "${WEALTHFOLIO_TOKEN:-}" ]; then
+              echo "❌ WEALTHFOLIO_TOKEN nu este configurat."
+              exit 1
+            fi
+
+            echo "💼 Testez conexiunea Wealthfolio..."
+
+            python - <<'PY'
+          from src.brokers.wealthfolio.portfolio import load_wealthfolio_holdings
+
+          holdings = load_wealthfolio_holdings()
+
+          print("")
+          print("==========================================")
+          print(f"✅ Wealthfolio conectat: {len(holdings)} poziții")
+          print("==========================================")
+
+          for item in holdings:
+              print(
+                  f"{item.symbol:10} "
+                  f"qty={item.quantity:<10g} "
+                  f"avg_cost={item.avg_cost_base} "
+                  f"value={item.market_value_base} "
+                  f"pnl={item.unrealized_gain_pct}"
+              )
+          PY
+
+            echo ""
+            echo "✅ Snapshot salvat în reports/portfolio_holdings.json"
+
+          elif [ "$MODE" = "market-only" ]; then
             python main.py --market-review --no-notify $FORCE_RUN_ARG
+
           else
             if [ -z "${WEALTHFOLIO_URL:-}" ]; then
               echo "❌ WEALTHFOLIO_URL nu este configurat."
@@ -592,6 +630,7 @@ jobs:
           retention-days: 30
 
       - name: Generează PDF și trimite pe Telegram
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'portfolio-test' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
