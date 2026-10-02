@@ -3,7 +3,7 @@ name: Analiza zilnică a acțiunilor
 on:
   # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
   schedule:
-    - cron: '7 10 * * 1-5'
+    - cron: '7 2 * * 1-5'
       timezone: 'Europe/Chisinau'
   
   # 手动触发
